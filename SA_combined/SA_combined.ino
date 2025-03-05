@@ -156,7 +156,7 @@ const char m_about[] PROGMEM = {"<P>SolarAdapter/EVSE is owned, developed and ma
                                 "<P>The rest of the open source software is unmodified and licensed under the GNU Lesser General Public License (LGPL)<P>"
                                 "<P>ESP8266 Arduino Core</P>"
                                 "<P>Arduino Core Libraries</P>"
-                                "<P><A href = 'https://github.com/2MuchSun/SolarEVSE-Adapter.git'>Source Code<P>";
+                                "<P><A href = 'https://github.com/2MuchSun/SolarEVSE-Adapter.git'>Source Code<P>"
                                 "<BR><FORM ACTION='/'>"
                                 "<INPUT TYPE=submit VALUE='Home'>"
                                 "</FORM>"
