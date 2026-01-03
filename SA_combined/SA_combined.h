@@ -33,8 +33,11 @@
 //#define FIRST_ARTICLE
 
 #define THIS_DEVICE "SA"
-#define VERSION "2.94"  //2.94 change wait times after a power adjustment and added downscan as criteria to change power adjustment in automatic tracking algorithm
-                        //2.93 update devices quicker and made extra power indicator better - released
+#define VERSION "2.97"  //2.97 added temporary done for autotracking and received_time_on for turn off after temp on for autotracking, bug fixing, change split phase voltage back to 125
+                        //2.96 increased split-phase voltage to 128 to minimize autotracking oscillations, changed color coding meaning of extra power, added support for JuiceBox EVSE
+                        //2.95 re-enabled alt set current in debug page with protection - released but not githubbed
+                        //2.94 change wait times after a power adjustment and added downscan as criteria to change power adjustment in automatic tracking algorithm -released
+                        //2.93 update devices quicker and made extra power indicator better
                         //2.92 disabled alt set current in debug page
                         //2.91 figured out the increment is incorrect causing behavior noticed when creating 2.9.  Should be adding not subtracting i.e. extra_power + offset
                         //2.9 added alterate set_current in debug page to troubleshoot problem with set_current changing?
@@ -58,7 +61,6 @@
 #endif
 
 #define MY_NTP_SERVER "us.pool.ntp.org"           
-#define MY_TZ "EST5EDT,M3.2.0,M11.1.0"
 
 #define DEFAULTSSID  "powermc"    //default to connect to powermc AP
 #define DEFAULTPASS  "password"   //default to connect to powermc AP
@@ -86,6 +88,9 @@
 #define SCHEDULE_AT_START 10        // 1 byte   for scheduling autotracking
 #define START_AT_START 11           // 1 byte   start hour for autotracking
 #define STOP_AT_START 12            // 1 byte   stop hour for autotracking
+#define TRANSITION_WAIT_START  13   // 2 bytes
+#define ALLOW_ON_START 15
+#define ALLOW_ON_MAX_LENGTH 1
 #define LOCATION_START 94
 #define LOCATION_MAX_LENGTH 32
 #define SW_CONFIG_START 126
@@ -104,6 +109,8 @@
 #define CONSUMED_MAX_LENGTH 20
 #define GENERATED_START 312
 #define GENERATED_MAX_LENGTH 20
+#define IPOWER_START 364
+#define IPOWER_MAX_LENGTH 2
 #define MQTT_PORT_START 464
 #define MQTT_PORT_MAX_LENGTH 5
 #define MODE_START 475
@@ -118,6 +125,8 @@
 #define DEVICE_PRIORITY_MAX_LENGTH 1
 #define HI_AMP_SETPOINT_START 481
 #define HI_AMP_SETPOINT_MAX_LENGTH 1
+#define ALT_SET_CURRENT_START 500
+#define ALT_SET_CURRENT_MAX_LENGTH 1
 #define MEMORY_CHECK_START 510
 #define MEMORY_CHECK_MAX_LENGTH 1
 #define SOLAR_EVSE_START 511
@@ -126,33 +135,34 @@
 #define SKIP_PP_MAX_LENGTH 1
 #define BOOT_START 513
 #define BOOT_MAX_LENGTH 1
-#define IPOWER_START 514
-#define IPOWER_MAX_LENGTH 2
-#define ALLOW_ON_START 516
-#define ALLOW_ON_MAX_LENGTH 1
+#define EVSE_TYPE_START 517          // 0 generic, 1 juicebox
+#define JUICEBOX 1
 
 #define SERVER_UPDATE_RATE 15000 //update data every 15 seconds
 #define WAIT_FOR_POWER_CHANGE 10000  //10 seconds default
 #define PLUG_IN_MASK 0x08
 #define PLUG_IN 12
 #define CHARGING 13
-#define EVSE_PILOT 3
+#define EVSE_PILOT3 3
+#define EVSE_PILOT1 1
 #define DEVICE_CYCLE_TIME 40000
 #define REPORTING_IN_RATE 35000 //35 secs device sends status to pm devices topic
 #define PM_CYCLE_TIME 11000 //10 + 1 sec
 #define DELAY_START DEVICE_CYCLE_TIME
 #define MAX_NUM_DEVICES 30
 #define MAX_NUM_PMS 5
-#define PLUG_OUT_TIMEOUT 3000 //was 20 secs
+#define PLUG_OUT_TIMEOUT 3000 
 #define LOWER_PRIORITY_CONDITION ((adapter_enabled == 0) || (plugged_in == 0) || g_EvseController.IsBypassMode() || g_EvseController.IsAutomaticMode() == 0) //define conditions to decrease to the next device here
 #define HIGHER_PRIORITY_CONDITION ((plugged_in == 0) || g_EvseController.IsBypassMode() || (g_EvseController.IsAutomaticMode() == 0) || ((pilot >= maxamp) && (adapter_enabled == 1)))  //define conditions to increase to the next device here
-#define EVSE_READY (set_current >= MIN_CURRENT_CAPACITY_J1772)
+#define EVSE_READY ((set_current >= MIN_CURRENT_CAPACITY_J1772) && (received_error == ""))
 #define DOUBLE_TIME_LIMIT_MAX  48       // x30 minutes
 #define HALF_CHARGE_LIMIT_MAX  75     // x2 kWh
 #define NO_PP 400
 #define PP_PRESS 98      //100 for standard J1772 for 480 ohms, 90 for Tesla mobile for 430 ohms
 #define PP_NOT_PRESS 55  //35 for standard J1772 for 150 ohm, 65 for Tesla mobile for 380 ohms
-
+#define ADAPTER_MODE_ENABLED 0
+#define ADAPTER_MODE_SLEEP 1
+#define LED_TIMEOUT 300000   //in ms - 5 min - how long before LEDs turn off to use less power
 #ifdef PROTOTYPE
 #define USE_SA_PILOT 16 //not used
 #define PILOT 14
@@ -166,8 +176,8 @@
 #define SA_STATUS_UPDATE_RATE 10000
 #define SLOW_BLINK_RATE 1000
 #define FAST_BLINK_RATE 500
-#define FIRMWARE_UPDATE_CHECK 18000000    //check network every 300 minutes for updates
-#define TIME_TO_RESET_ESP 1800000         //if can't auto connect in 30 min then try resetting
+#define FIRMWARE_UPDATE_CHECK 18000000    //in msec check network every 300 minutes for updates
+#define TIME_TO_RESET_ESP 1800000         //in msec if can't auto connect in 30 min then try resetting
 
 #define UPDATE_HOST "<myhost.com>"
 #define UPDATE_URL  "<https://myhost.com:1880/update/>"
@@ -180,13 +190,12 @@
 #define WIFI_MQTT 4
 // #define SERDBG
 
-// n.b. DEFAULT_SERVICE_LEVEL is ignored if ADVPWR defined, since it's autodetected
 #define DEFAULT_SERVICE_LEVEL 2 // 1=L1, 2=L2
 
 // current capacity in amps
 #define DEFAULT_CURRENT_CAPACITY_L1 12
 #define DEFAULT_CURRENT_CAPACITY_L2 12
-#define SPLIT_PHASE_VOLTAGE 120
+#define SPLIT_PHASE_VOLTAGE 125  
 
 // minimum allowable current in amps
 #define MIN_CURRENT_CAPACITY_J1772 6 // J1772 min = 6
@@ -194,7 +203,7 @@
 #define MIN_CURRENT_CAPACITY_L2 MIN_CURRENT_CAPACITY_J1772 
 
 // maximum allowable current in amps solar adapter does not distinguish between L1 or L2, should be the same
-#define MAX_CURRENT_CAPACITY_L1 40 //  not used
+#define MAX_CURRENT_CAPACITY_L1 16 // 
 #define MAX_CURRENT_CAPACITY_L2 80 // 
 
 // for J1772.ReadPilot()
@@ -203,9 +212,9 @@
 #include "J1772Pilot.h"
 #include "J1772EvseController.h"
 
-extern void saveWord(int16_t value, int16_t location);
+extern String received_error;
 extern void writeEEPROMbyte(uint16_t start_byte, uint8_t contents);
 extern uint8_t readEEPROMbyte(uint16_t start_byte);
 extern bool immediate_status_update, forced_reset_priority, limits_reached;
-extern uint8_t adapter_enabled, adc_address, set_current, plugged_in, skip_pp, solar_evse, allow_on_temporarily;
+extern uint8_t adapter_enabled, adc_address, set_current, plugged_in, skip_pp, solar_evse, allow_on_temporarily, valid_vent;
 extern uint16_t unplugged_hi, unplugged_lo, plugged_in_hi, plugged_in_lo, charge_hi, charge_lo, unplugged_count, plugged_in_count, charge_count, sample_pp;

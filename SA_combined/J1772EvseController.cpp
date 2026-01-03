@@ -25,22 +25,11 @@ THRESH_DATA g_DefaultThreshData = {875-128-37,780-128-37,690-128-37,0,260-128-37
 #ifdef FIRST_ARTICLE
 THRESH_DATA g_DefaultThreshData = {825,716,590,0,190}; //{875,780,690,0,260}  for first articles
 #else
-THRESH_DATA g_DefaultThreshData = {800,700,620,0,180}; //{875,780,690,0,260}  for final production version
+THRESH_DATA g_DefaultThreshData = {800,700,600,0,220}; //{875,780,690,0,260}  for final production version
 #endif
 #endif
 
 J1772EVSEController g_EvseController;
-
-void J1772EVSEController::Reboot()
-{
-  m_Pilot.SetState(PILOT_STATE_P12);
-
-  if (chargingIsOn()) {
-   // give the EV some time to open its contactor in response to P12
-    delay(3000);
-  }
-  ESP.reset(); 
-}
 
  void J1772EVSEController::SaveEvseFlags()
  {
@@ -76,10 +65,10 @@ void J1772EVSEController::SetAutomaticMode(uint8_t tf, uint8_t no_save)
    {
       m_wFlags &= ~ECF_AUTOMATIC;
       SetCurrentCapacity(MIN_CURRENT_CAPACITY_J1772,1); //set pilot to minimum
-      if (EVSE_READY && plugged_in && allow_on_temporarily){ //turn on full power when plugged in so that auto tracking will adjust to proper priority
+      if (EVSE_READY && plugged_in && allow_on_temporarily){ //turn on power when plugged in so that auto tracking will adjust to proper priority
         forced_reset_priority = true;
         Enable();
-        SetCurrentCapacity(set_current,1);
+        SetCurrentCapacity(MIN_CURRENT_CAPACITY_J1772,1);
        }
    } 
    else 
@@ -212,10 +201,9 @@ void J1772EVSEController::Init()
   else {
     m_wFlags = rflgs;
   }
-     
-  if (IsStartSleep())
-    Sleep();
-  
+
+  Sleep();   //start off in sleep, will change to user set adapter mode in setup if start up in sleep flag is not set
+   
   if (IsBypassMode())
     SetAdapterBypass(1);
 
@@ -360,21 +348,25 @@ void J1772EVSEController::Update()
   }
   if (sample_pp < (PP_NOT_PRESS + 20) || sample_pp > (NO_PP - 20)){
     if ((m_Pilot.GetState() == PILOT_STATE_PWM) && (plow >= m_ThreshData.m_ThreshDS) && DiodeCheckEnabled()) {
+        valid_vent = 0;
         // diode check failed
         tmp_state = ADAPTER_STATE_DIODE_CHK_FAILED;
         tmppilotstate = ADAPTER_STATE_DIODE_CHK_FAILED;
     }
     else if (phigh >= m_ThreshData.m_ThreshAB) {
+        valid_vent = 0;
         // 12V EV not connected
         tmp_state = ADAPTER_STATE_A;
         tmppilotstate = ADAPTER_STATE_A;
     }
     else if (phigh >= m_ThreshData.m_ThreshBC) {
+        valid_vent = 0;
         // 9V EV connected, waiting for ready to charge
         tmp_state = ADAPTER_STATE_B;
         tmppilotstate = ADAPTER_STATE_B;
     }
     else if (phigh >= m_ThreshData.m_ThreshCD) {
+        valid_vent = 0;
         // 6V ready to charge
         tmppilotstate = ADAPTER_STATE_C;
         if (charge_hi < phigh)
@@ -390,12 +382,18 @@ void J1772EVSEController::Update()
         }
     }
     else if (phigh > m_ThreshData.m_ThreshD) {
-        tmppilotstate = ADAPTER_STATE_D;
+        valid_vent++;
+        if (valid_vent > 100)
+          valid_vent = 100;
         // 3V ready to charge vent required
         if (VentReqEnabled()) {
-  	      tmp_state = ADAPTER_STATE_D;
+          if (valid_vent > 4){    //must detect valid vent 5 times in a row to consider valid
+            tmppilotstate = ADAPTER_STATE_D;
+  	        tmp_state = ADAPTER_STATE_D;
+          }        
         }
         else {
+          tmppilotstate = ADAPTER_STATE_D;
   	      tmp_state = ADAPTER_STATE_C;
         }
     }
@@ -547,9 +545,15 @@ void J1772EVSEController::Calibrate(PCALIB_DATA pcd)
 
 uint8_t J1772EVSEController::SetCurrentCapacity(uint8_t amps,uint8_t nosave)
 {
-  uint8_t rc = 0;
+  uint8_t rc = 0, desired_max;
   immediate_status_update = true;
-  if ((amps >= MIN_CURRENT_CAPACITY_J1772) && (amps <= MAX_CURRENT_CAPACITY_L2)) {
+  if ((set_current >= MIN_CURRENT_CAPACITY_J1772) && (set_current <= MAX_CURRENT_CAPACITY_L2)) {
+    desired_max = set_current;
+  }
+  else {
+    desired_max = MAX_CURRENT_CAPACITY_L1;
+  }
+  if ((amps >= MIN_CURRENT_CAPACITY_J1772) && (amps <= desired_max)) {
     m_CurrentCapacity = amps;
   }
   else if (amps < MIN_CURRENT_CAPACITY_J1772) {
@@ -557,7 +561,7 @@ uint8_t J1772EVSEController::SetCurrentCapacity(uint8_t amps,uint8_t nosave)
     rc = 1;
   }
   else {
-    m_CurrentCapacity = MAX_CURRENT_CAPACITY_L2;
+    m_CurrentCapacity = desired_max;
     rc = 2;
   }
 

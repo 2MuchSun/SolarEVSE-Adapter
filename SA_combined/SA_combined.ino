@@ -1,5 +1,5 @@
  /*
- * Copyright (c) 2023-2025 2MuchSun.com by Bobby Chung
+ * Copyright (c) 2023-2026 2MuchSun.com by Bobby Chung
  * Parts of this software is based on Open EVSE - Copyright (c) 2011-2023 Sam C. Lin, Copyright (c) 2011-2014 Chris Howell <chris1howell@msn.com>
  * This software is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -35,6 +35,8 @@ String priority_message;
 String charge_limit_message;
 String time_limit_message;
 String schedule_AT_message;
+String timer_message;
+bool received_timer = false;
 bool received_schedule_AT = false;
 bool received_time_limit = false;
 bool received_charge_limit = false;
@@ -50,22 +52,24 @@ bool received_pilot = false;
 bool found_other_pm = false;
 bool change_network = false;
 
+String received_error = "", received_from_evse = "", evse_tempS = "", header_received = "";
 String lastConnectionResults = "";
 String initialConnectionResults = "";
-uint8_t unplug_time = 6;
-uint8_t boot_count, allow_on_temporarily = 0, factor = 0;
+uint8_t unplug_time = 5, valid_vent = 0, evse_state = 0, override_evse_set_pilot = false, received_time_on = 255;
+uint8_t boot_count, reboot = 0, allow_on_temporarily = 0, factor = 0;
 uint8_t adc_address = 0, connection_mode = NONE, consumed_data_status = 0;
-uint16_t sample_pp;
-bool immediate_status_update = false, no_consumed_data_received = true;
-uint8_t solar_evse, skip_pp;
-bool enable_update = true;
+uint16_t sample_pp, evse_voltageX10, evse_currentX10, evse_pfX1000;
+uint16_t on_off_wait_time = 15;
+int8_t evse_tempC;
+bool immediate_status_update = false, publish_immediately = false, no_consumed_data_received = true, reset_sleep = false, start_timeout = false;
+uint8_t solar_evse, skip_pp, evse_max = 32, one_second =  0;
 uint8_t wps_check = 0;
 long lastReconnectAttempt = 0;
 unsigned long start_time, recorded_elapsed_time = 0;
 float kilowatt_seconds_accum = 0;
 uint16_t interval_time, wait_for_power_change = WAIT_FOR_POWER_CHANGE;
+uint32_t lifetime_energy = 0;
 IPAddress currentAddress = 0;
-
 
 const char device_name[] PROGMEM = {"SolarAdapter"};
 const char device_name1[] PROGMEM = {"SolarEVSE"};
@@ -147,7 +151,7 @@ const char m_submit[] PROGMEM = {"<INPUT TYPE=submit VALUE='    Submit    '></FO
                               "<TD><FORM ACTION='/'><INPUT TYPE=submit VALUE='    Cancel    '></FORM></TD>"
                               "</TR></TABLE>"
                               "</BODY></HTML>"};
-const char m_about[] PROGMEM = {"<P>SolarAdapter/EVSE is owned, developed and maintained by 2 Much Sun, LLC in Atlanta, Georgia - Copyright (C) 2024-2025 by 2 Much Sun, LLC</P>"
+const char m_about[] PROGMEM = {"<P>SolarAdapter/EVSE is owned, developed and maintained by 2 Much Sun, LLC in Atlanta, Georgia - Copyright (c) 2024-2026 by 2 Much Sun, LLC</P>"
                                 "<P>SolarAdapter/EVSE is an original work using the following open source software unmodified and licensed under the MIT License</P>"
                                 "<P>PubSubClient - Copyright (c) 2008-2020 Nicholas O'Leary</P>"
                                 "<P>ArduinoJson - Copyright (c) 2014-2024 Benoit Blanchon</P>"
@@ -161,7 +165,42 @@ const char m_about[] PROGMEM = {"<P>SolarAdapter/EVSE is owned, developed and ma
                                 "<INPUT TYPE=submit VALUE='Home'>"
                                 "</FORM>"
                                 "</BODY></HTML>"};
-//SERVER variables
+const char m_updates[] PROGMEM = {"<BR><INPUT TYPE=submit VALUE='    Save    '>"
+                                  "</FORM><BR><FORM ACTION='/dbg'><P>&nbsp;&nbsp;<INPUT TYPE=submit NAME='submit' VALUE='Check for Updates'></P>"
+                                  "<P STYLE='COLOR:#00A000'>Note. If it hangs after pressing this button, then it means an update is being installed. Please wait about 2 minutes before selecting 'Done'.</P>"
+                                  "</FORM>"
+                                  "&nbsp;<TABLE><TR>"
+                                  "<TD><FORM ACTION='/'><INPUT TYPE=submit VALUE='    Done    '></FORM></TD>"
+                                  "</TR></TABLE>"};
+const char m_show_data[] PROGMEM = {" or when any settings change</I></P>"
+                                    "<P><B>Topic: </B>_BASE2_st<B> Payload: </B>JSON DICT _OUT1_</P>"
+                                    "<P><I>The following actual data is published to the MQTT Broker at _MBROKER_ every _RATE_"
+                                    " secs or when the priority changes</I></P>"
+                                    "<P><B>Topic: </B>_BASE_devs<B> Payload: </B>JSON DICT _OUT2_</P>"
+                                    "<P><B>Topic: </B>_BASE_slow_load<B> Payload: </B> _SLOWLOAD_</P>"
+                                    "<P><I>The following actual data is published to the MQTT Broker at _MBROKER_ when this device has completed its actions</I></P>"
+                                    "<P><B>Topic: </B>_BASE_done<B> Payload: </B>_AINDEX_ (assigned index)</P>"
+                                    "<P><I>The following data is published to the MQTT Broker at _MBROKER_ when this device requests for a priority scan reset</I></P>"
+                                    "<P><B>Topic: </B>_BASE_rp<B> Payload: </B> 1 for reset</P>"
+                                    "<FORM ACTION='/'><P><INPUT TYPE=submit VALUE='  Home  '></P></FORM>"
+                                    "</BODY></HTML>"};
+
+const char m_show2[] PROGMEM = {"<P><B>Topic: </B>2ms/PM/devs<B> Payload: </B>JSON DICT ip:[string],dnum:[int 0-9], mac:[string]</P>"
+                                "<P><B>Topic: </B>_BASE_s<B> Payload: </B> (int 0-1) </P>"
+                                "<P><B>Topic: </B>_BASE_next<B> Payload: </B>JSON DICT NOD:[int 1-_MAX_ number of devices found], idx:[int (0-"
+                                "_MAX1_) device's assigned index], m:[string device's MAC address], "
+                                "d:[int 0 - above reference power, 1 - below reference power] (reference power is -offset), o:[-32,768 to + 32,768 - offset] "
+                                "limit to import or export to grid, to:[int 0-255]</P>"
+                                "<P><B>Topic: </B>_BASE_devs<B> Payload: </B>JSON DICT dpriority:[int 1-254], dname:[string], dnumber:[int 0-"
+                                "_MAX1_], dtype:[string], mdns:[string], mac:[string], ipower:[int 0 - 65000], ip:[string]</P>"
+                                "<P><B>Topic: </B>_BASE2_c/auto<B> Payload: </B> (int 1-autotracking 0-disable autotracking)</P>"  
+                                "<P><B>Topic: </B>_BASE2_c/priority<B> Payload: </B> (int 1-254, device's priority)</P>"
+                                "<P><B>Topic: </B>_BASE2_c/enabled<B> Payload: </B> (int 0-sleep, 1-enabled)</P>"
+                                "<P><B>Topic: </B>_BASE2_c/bypass<B> Payload: </B> (int 0-use adapter, 1-bypass adapter/pass through)</P>"
+                                "<P><B>Topic: </B>_BASE2_c/schedAT<B> Payload: </B> (int 0-turn off, 1-turn on auto tracking schedule, on if valid times are set in the web UI)</P>"
+                                "<P><B>Topic: </B>_BASE2_c/timer<B> Payload: </B> (int 0-turn off, 1-turn on delay timer, on if valid times are set in the web UI)</P>"};
+
+// SERVER variables
 // determines server state
 bool server2_down = true;    //MQTT server
 bool ready_to_start = false; 
@@ -179,25 +218,26 @@ String out1, out2;
 uint8_t device = 0, no_mqtt = 0;
 
 // for Adapter basic info
-uint8_t adapter_enabled = 0;
+uint8_t adapter_enabled = 0;  //current mode - enabled or not
+uint8_t evse_type = 0;        //0 is generic, other numbers are specific ones like 1 for JuiceBox
 int32_t extra_power = 0;
 float consumed_power = 0.0;
 float generated_power = 0.0;
-uint8_t pilot = 0;
+uint8_t pilot = 0, pilot_pin;
 uint8_t adapter_flag = 0;
 uint8_t plugged_in = 0;
 uint8_t pre_plugged_in = 0;
 int16_t offset = 0; //amount allowed to be over
 uint16_t unplugged_hi = 0, unplugged_lo = 1023,plugged_in_hi = 0, plugged_in_lo = 1023, charge_hi = 0, charge_lo = 1023, unplugged_count = 0, plugged_in_count= 0, charge_count = 0;
-uint8_t set_current = 0;
+uint8_t set_current = 0, alt_set_current = 0;
 uint8_t pre_set_current = 0;
-int ipower;
-bool forced_reset_priority = false, previously_auto_mode = false;
-uint8_t timer_enabled = 0, double_time_limit = 0, start_hour, start_min, stop_hour, stop_min, time_zone, half_charge_limit = 0;
+uint16_t ipower;
+bool forced_reset_priority = false;
+uint8_t timer_enabled = 0, double_time_limit = 0, start_hour, start_min, stop_hour, stop_min, time_zone, half_charge_limit = 0, previously_auto_mode = 0;
 bool timer_started = false, limits_reached = false;
-uint8_t transition = 0;
 
 // for setting up own network and autotracking
+uint8_t transition = 0;
 String sw_config;
 uint8_t hi_amp_setpoint;
 uint8_t saved_hi_amp_setpoint;
@@ -205,7 +245,7 @@ uint8_t number_of_devices = 0;
 uint8_t device_priority;
 String slow_load = "0";
 bool publish_done = false;
-uint8_t down_scan = 0;
+uint8_t down_scan = 0, temporarily_done = 0;
 String location_name = "";
 uint8_t current_done_index;
 uint8_t assigned_index = 0;
@@ -245,6 +285,7 @@ uint8_t schedule_AT, start_AT, stop_AT;
 int16_t turn_off_threshold;
 int16_t turn_on_threshold;
 int16_t increase_threshold;
+int16_t decrease_threshold;
 
 unsigned long Timer;
 unsigned long Timer2;
@@ -255,9 +296,11 @@ unsigned long Timer8;
 unsigned long Timer_zero;
 unsigned long Timer10;
 unsigned long Timer11;
+unsigned long Timer12;
 unsigned long Timer20;
 unsigned long m_LastCheck;
-uint8_t adapter_mode = 0;
+unsigned long Timeout_start_time;
+uint8_t user_set_adapter_mode;   //when the user sets the adapter to either sleep or enabled
 uint8_t adapter_state;
 uint8_t vflag;
 
@@ -351,7 +394,6 @@ void getDateTimeString(uint8_t type, String& str) {
     str = hour + ":" + minS +  " " + noon + " " + dst; // format 1:20 PM (DST)
 }
 
-
 //Starts the WPS configuration
 bool startWPS() {
   //Serial.println("WPS Configuration Started");
@@ -379,7 +421,7 @@ bool startWPS() {
 
 void processReceivedNextData(char* payload) {
   char* tmpj;
-  StaticJsonDocument <128> doc;
+  JsonDocument doc;
   tmpj = payload;
   deserializeJson(doc,tmpj);
   number_of_devices = doc["NOD"];
@@ -389,11 +431,12 @@ void processReceivedNextData(char* payload) {
   selected_device_mac_address = received_device_mac_address;
   received_device_ip_address = String(doc["ip"]);
   offset = doc["o"];
+  received_time_on = doc["to"];
 }
 
 void processReceivedDeviceData(char* payload) {
   char* tmpj;
-  StaticJsonDocument <256> doc;
+  JsonDocument doc;
   tmpj = payload;
   deserializeJson(doc,tmpj);
   String tmpStr = doc["mdns"];
@@ -420,16 +463,11 @@ void bootOTA() {
 
   ArduinoOTA.onStart([]() {
     //Serial.println("Start");
-    enable_update = false;
-    no_mqtt = 1;
     boot_count--;  // don't count OTA updates as real reboots
     writeEEPROMbyte(BOOT_START,boot_count);  
-    client.disconnect();
   });
   ArduinoOTA.onEnd([]() {
     //Serial.println("\nEnd");
-    enable_update = true;
-    no_mqtt = 0;
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     //Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
@@ -521,13 +559,17 @@ void displayConnectionStatus(String& s1) {
         if (server2_down)
           s1 += "<SPAN STYLE='COLOR:#FFB000'>MQTT Broker is not reachable (Error code #" + String(client.state()) + ")  Trying again...</SPAN>";
         else {
-          s1 += "<SPAN STYLE='COLOR:#00A000'>MQTT Broker is connected and updated every ";
-          s1 += String(wait_for_power_change/2000.0,1);
-          if (wait_for_power_change == 2000)
-            s1 += " sec";
-          else
-            s1 += " secs";
-          s1 += "</SPAN>";
+          if (number_of_pms_found == 0)
+            s1 += "<SPAN STYLE='COLOR:#00A000'>MQTT Broker is connected with no PowerMC found</SPAN>";
+          else {
+            s1 += "<SPAN STYLE='COLOR:#00A000'>MQTT Broker is connected and updated every ";
+            s1 += String(wait_for_power_change/2000.0,1);
+            if (wait_for_power_change == 2000)
+              s1 += " sec";
+            else
+              s1 += " secs";
+            s1 += "</SPAN>";
+          }
         }
       }
       else
@@ -600,7 +642,7 @@ void connectWiFi() {
       rebootIntoAPMode();  //failed
     }
     else{
-      ESP.reset();  //passed
+      reboot = 1;  //passed
     }
   }      
 }
@@ -679,16 +721,32 @@ void processWiFiConnectionAttempt() {
   }
 }
 
+void setDelayTimer(uint8_t setting) {
+  if (setting != timer_enabled){
+    if (setting){
+      if (IsTimerValid())
+        timer_enabled = 1;
+    }
+    else {
+      timer_enabled = 0;
+    }
+    if (IsTimerValid())
+      writeEEPROMbyte(TIMER_ENABLED_START,timer_enabled);
+    immediate_status_update = true;
+  }
+}
+
 void setAutoSchedule(uint8_t setting) {
   if (setting != schedule_AT){
     if (setting){
-      schedule_AT = 1;
+      if (start_AT != stop_AT)
+        schedule_AT = 1;
     }
     else {
       schedule_AT = 0;
     }
-    writeEEPROMbyte(SCHEDULE_AT_START,schedule_AT);
     immediate_status_update = true;
+    writeEEPROMbyte(SCHEDULE_AT_START,schedule_AT);
   }
 }
 
@@ -700,18 +758,26 @@ void publishResetPriority() {
      tmp2 = base + "rp";
      tmp = "1";
      if (!server2_down){
-       client.publish(tmp2.c_str(),tmp.c_str());
+       if (!client.publish(tmp2.c_str(),tmp.c_str()))
+          server2_down = true;
      }    
    }
 }
 
-void publishDone() {
+void publishDone(){
    String tmp2;
+   uint8_t a_index;
    if (publish_done){
      publish_done = false;
-     tmp2 = base + "done";   
+     selected_device_mac_address = "0";
+     tmp2 = base + "done";
+     if (temporarily_done == 1)    //switching only but temporarily give up control to other loads while switching service level
+      a_index = assigned_index + 100;
+     else
+      a_index = assigned_index;   
      if (!server2_down){
-        client.publish(tmp2.c_str(),String(assigned_index).c_str());
+        if (!client.publish(tmp2.c_str(),String(a_index).c_str()))
+          server2_down = true;
      }
    }
 }
@@ -732,12 +798,13 @@ uint8_t checkEVSEStatus() {
   uint8_t set_pilot = 0;
   unsigned long base_time = millis();
   interval_time = 0;
+
   digitalWrite(PLUG_IN, HIGH);
+  attachInterrupt(digitalPinToInterrupt(pilot_pin), EvsePilotISR, CHANGE);  
   delay(5);
   while (set_pilot == 0 && (millis() - base_time) < 50){
     if (interval_time != 0){ //if false, then no interrupt happened so PE is not transitioning ie PWM is off or PE not connected to EVSE
       p_interval_time = interval_time;
-      //delay(10);
       if (abs(p_interval_time - interval_time) < 10 && interval_time < 1005 && interval_time > 5)  // checks okay
         set_pilot = calculateEVSEPilot(interval_time);
       else {
@@ -747,8 +814,17 @@ uint8_t checkEVSEStatus() {
   }
   if (!plugged_in)
     digitalWrite(PLUG_IN, LOW);
-  if (set_pilot == 0)
-    g_EvseController.Sleep();
+  detachInterrupt(digitalPinToInterrupt(pilot_pin));
+  if (solar_evse && (evse_type == JUICEBOX)){
+    if ((evse_max > set_pilot) && (set_pilot >= MIN_CURRENT_CAPACITY_J1772)){
+      set_pilot = evse_max;
+      override_evse_set_pilot = true;
+    }
+    else
+      override_evse_set_pilot = false;
+  }
+  if (alt_set_current >= MIN_CURRENT_CAPACITY_J1772)           //if not auto detect
+    set_pilot = alt_set_current;
   return set_pilot;
 }
 
@@ -763,6 +839,12 @@ String readEEPROM(uint16_t start_byte, uint16_t allocated_size) {
 
 uint8_t readEEPROMbyte(uint16_t start_byte) {
   return EEPROM.read(start_byte);
+}
+
+uint16_t readEEPROMword(uint16_t start_byte) {
+  uint16_t tmp = readEEPROMbyte(start_byte) << 8;
+  uint16_t value = tmp + readEEPROMbyte(start_byte + 1);
+  return value;
 }
 
 void writeEEPROM(uint16_t start_byte, uint16_t allocated_size, String contents) {
@@ -784,6 +866,13 @@ void writeEEPROMbyte(uint16_t start_byte, uint8_t contents) {
   EEPROM.commit();
   //Serial.println("inside writeEEPROMbyte function");
   delay(10);
+}
+
+void writeEEPROMword(uint16_t location, uint16_t value) {
+  uint8_t byte = value >> 8;
+  writeEEPROMbyte(location, byte);
+  byte = value & 0x00ff;
+  writeEEPROMbyte(location + 1, byte);
 }
 
 void resetEEPROM(uint16_t start_byte, uint16_t end_byte) {
@@ -830,7 +919,7 @@ void handleWPS() {
 void rebootIntoAPMode() {
   //Serial.println("inside rebootIntoAPMode()");
   writeEEPROMbyte(START_AP_START, AP);
-  ESP.reset();
+  reboot = 1;
 }
 
 void handleWPSR() {
@@ -858,7 +947,7 @@ void handleWPSR() {
   } 
   else if (wps_check == 2) {
     //Serial.println("WPS Configuration passed, connected to " + WiFi.SSID());
-    ESP.reset();
+    reboot = 1;
   }
 }
 
@@ -908,6 +997,19 @@ void handleSettings() {
   if (server.arg("cancel") == "   Cancel   "){
     change_network = false;
   }
+  if (server.arg("submit") == "Disable MQTT") {          // 1 - no MQTT
+    no_mqtt = 1;
+    writeEEPROMbyte(NO_MQTT_START,no_mqtt);
+    client.disconnect();
+    server2_down = true;
+    if (g_EvseController.IsAutomaticMode())
+      g_EvseController.Sleep();
+  }
+  if (server.arg("submit") == " Enable MQTT ") {         // 0 - use MQTT
+    no_mqtt = 0;
+    writeEEPROMbyte(NO_MQTT_START,no_mqtt);
+  }
+  Timer12 = millis();   //reset LED timeout
   header1(s);
   header2("Network Configuration", hStr);
   s += hStr;
@@ -952,7 +1054,6 @@ void handleSettings() {
     s += "<FORM ACTION='/set'>";  
     s += "<INPUT TYPE=submit NAME='change' VALUE='Change WiFi Network'>";
     s += "</FORM>";
-    s += "<FORM METHOD='post' ACTION='/cfg'>";
   }
   if (!WiFi.isConnected()){
     s += "<P>Note. You are not connected to any network so no data will be sent ";
@@ -966,14 +1067,18 @@ void handleSettings() {
     s += "<P>________________________________________</P>";
     s += "<P><B>MQTT Server:</B> to publish the ";
     s += deviceName();
-    s += " status & subscribe to Power and control data</P>";
-    s += "<P><I>Use MQTT? <INPUT TYPE='radio' NAME='nomqtt' VALUE='0'";
-    if (no_mqtt == 0) //use mqtt
-      s += " CHECKED";
-    s += "> Yes (default) <INPUT TYPE='radio' NAME='nomqtt' VALUE='1'";
-    if (no_mqtt == 1) //none
-      s += " CHECKED";
-    s += "> No </I></P>";
+    s += " status & subscribe to power and control data</P>";
+    s += "<FORM ACTION='/set'>";
+    if (no_mqtt == 0) {
+      s += "<P>MQTT enabled";
+      s += "&nbsp;&nbsp;<INPUT TYPE=submit NAME='submit' VALUE='Disable MQTT'></P>";
+    }
+    else {
+      s += "<P>MQTT disabled";
+      s += "&nbsp;&nbsp;<INPUT TYPE=submit NAME='submit' VALUE=' Enable MQTT '></P>";
+    }
+    s += "</FORM>";
+    s += "<FORM METHOD='post' ACTION='/cfg'>";
     if (!no_mqtt){
       s += "<P>Please fill in the information below on how to get or post data:</P>"; 
       s += "<P><LABEL><I> MQTT Broker Address (default is ";
@@ -1045,7 +1150,7 @@ void handleSettings() {
       processReservedCharacters(tmpStr);
       s += tmpStr + "'></P>";
       
-      s += "<P><I>Data format is <INPUT TYPE='radio' NAME='swconfig' VALUE='a'";
+      s += "<P><I>Data format for power data is <INPUT TYPE='radio' NAME='swconfig' VALUE='a'";
       if (sw_config == "a") //JSON
         s += " CHECKED";
       s += ">JSON (default)   <INPUT TYPE='radio' NAME='swconfig' VALUE='b'";
@@ -1137,14 +1242,9 @@ void handleShowCommands() {
   s += deviceName();
   s += " will respond to if published to the MQTT Broker at " + MQTTBroker;
   s += "</I></P>";
-  tmp2 = "2ms/PM/devs";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B>JSON DICT ip:[string],dnum:[int 0-9], mac:[string]</P>";
-  
-  tmp2 = base + "s";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int 0-1) </P>";
-    
+
   if (sw_config == "a"){
-    s += "<P><B>Topic: </B>" + base + "st<B> Payload: </B>JSON DICT " + consumed + ":[float W], " + generated + ":[float W], uprate:[int secs]</P>";
+    s += "<P><B>Topic: </B>" + base + "st<B> Payload: </B>JSON DICT " + consumed + ":[float W], " + generated + ":[float W], extra:[int W], uprate:[int secs]</P>";
   }
   else if (sw_config == "b"){
    s += "<P><B>Topic: </B>" + consumedTopic + "<B> Payload: </B> (string W)</P>";
@@ -1152,31 +1252,25 @@ void handleShowCommands() {
    tmp2 = base + "uprate";
    s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (string secs)</P>";      
   }
- 
-  tmp2 = base + "next";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B>JSON DICT NOD:[int 1-" + String(MAX_NUM_DEVICES) + " number of devices found], idx:[int (0-";
-  s += String(MAX_NUM_DEVICES-1) + ") device's assigned index], m:[string device's MAC address], ";
-  s += "d:[int 0 - above reference power, 1 - below reference power] (reference power is -offset), o:[-32,768 to + 32,768 - offset] limit to import or export to grid";
-  tmp2 = base + "devs";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B>JSON DICT dpriority:[int 1-254], dname:[string], dnumber:[int 0-";
-  s += String(MAX_NUM_DEVICES - 1) + "], dtype:[string], mdns:[string], mac:[string], ipower:[int 0 - 65000], ip:[string]</P>";
-  tmp2 = base2 + "c/auto";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int 1-autotracking 0-disable autotracking)</P>";  
-  tmp2 = base2 + "c/priority";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int 1-254, device's priority)</P>";  
-  tmp2 = base2 + "c/pilot";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int " + String(MIN_CURRENT_CAPACITY_J1772) + "-up to " + String(MAX_CURRENT_CAPACITY_L2) + " depending on EVSE Pilot Setting)</P>";
-  tmp2 = base2 + "c/level";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int 1-EVSE set to Level 1, 2-EVSE to Level 2)</P>";
-  tmp2 = base2 + "c/enabled";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int 0-sleep, 1-enabled)</P>";
-  tmp2 = base2 + "c/bypass";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int 0-use adapter, 1-bypass adapter/pass through)</P>";
-  tmp2 = base2 + "c/hiamp";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int " + String(MIN_CURRENT_CAPACITY_J1772) + "-up to " + String(MAX_CURRENT_CAPACITY_L2) + " depending on EVSE Pilot Setting)</P>";
-  tmp2 = base2 + "c/schedAT";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int 0-turn off, 1 -turn on - auto tracking schedule)</P>";
 
+  for (uint16_t k = 0; k < strlen_P(m_show2); k++) {
+     s += char(pgm_read_byte_near(m_show2 + k));
+  }
+  s.replace("_BASE_",base);
+  s.replace("_MAX_",String(MAX_NUM_DEVICES));
+  s.replace("_BASE2_",base2);
+  s.replace("_MAX1_",String(MAX_NUM_DEVICES-1));
+  
+  if (EVSE_READY) {
+    tmp2 = base2 + "c/pilot";
+    s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int " + String(MIN_CURRENT_CAPACITY_J1772) + "-up to " + String(set_current) + " depending on EVSE's Max)</P>";
+    tmp2 = base2 + "c/hiamp";
+    s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int " + String(MIN_CURRENT_CAPACITY_J1772) + "-up to " + String(set_current) + " depending on EVSE's Max)</P>";
+  }
+  if (evse_type != JUICEBOX) {
+    tmp2 = base2 + "c/level";
+    s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> (int 1-EVSE set to Level 1, 2-EVSE set to Level 2)</P>";
+  }
   s += "<FORM ACTION='/'><P><INPUT TYPE=submit VALUE='  Home  '></P></FORM>";
   s += "</BODY></HTML>";
   server.send(200, "text/html", s);
@@ -1204,27 +1298,17 @@ void handleShowData() {
     s += " sec";
   else
     s += " secs";
-  s += " or when any settings change</I></P>";
-  s += "<P><B>Topic: </B>" + base2 + "st<B> Payload: </B>JSON DICT " + out1 + "</P>";
-  s += "<P><I>The following actual data is published to the MQTT Broker at " + MQTTBroker + " every " + String(REPORTING_IN_RATE/1000);
-  s += " secs or when the priority changes</I></P>";
-
-  tmp2 = base + "devs";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B>JSON DICT " + out2 + "</P>";
-
-  tmp2 = base + "slow_load";      
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> " + slow_load + "</P>";
-  
-  s += "<P><I>The following actual data is published to the MQTT Broker at " + MQTTBroker + " when this device has completed its actions</I></P>";
-  tmp2 = base + "done";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B>" + assigned_index + " (assigned index)</P>"; 
-
-  s += "<P><I>The following data is published to the MQTT Broker at " + MQTTBroker + " when this device requests for a priority scan reset</I></P>";
-  tmp2 = base + "rp";
-  s += "<P><B>Topic: </B>" + tmp2 + "<B> Payload: </B> 1 for reset</P>"; 
-
-  s += "<FORM ACTION='/'><P><INPUT TYPE=submit VALUE='  Home  '></P></FORM>";
-  s += "</BODY></HTML>";
+  for (uint16_t k = 0; k < strlen_P(m_show_data); k++) {
+    s += char(pgm_read_byte_near(m_show_data + k));
+  }
+  s.replace("_BASE2_",base2);
+  s.replace("_OUT1_",out1);
+  s.replace("_MBROKER_",MQTTBroker);
+  s.replace("_RATE_",String(REPORTING_IN_RATE/1000));
+  s.replace("_BASE_",base);
+  s.replace("_OUT2_",out2);
+  s.replace("_SLOWLOAD_",slow_load);
+  s.replace("_AINDEX_",String(assigned_index));
   server.send(200, "text/html", s);
 }
 
@@ -1255,21 +1339,17 @@ void handleRapiR() {
         switch(rapi[2]) {
           case 'E': // enable adapter
             g_EvseController.Enable();
-            adapter_mode = 0;
-            writeEEPROMbyte(MODE_START,adapter_mode);
+            user_set_adapter_mode = ADAPTER_MODE_ENABLED;
+            writeEEPROMbyte(MODE_START,user_set_adapter_mode);
             g_EvseController.SetAutomaticMode(0);
             break;     
           case 'R': // reset adapter
-            client.disconnect();
-            delay(1000);
-            //WiFi.disconnect();
-            //delay(500);
-            ESP.reset();
+            reboot = 1;
             break;
           case 'S': // sleep
             g_EvseController.Sleep();
-            adapter_mode = 1;
-            writeEEPROMbyte(MODE_START,adapter_mode);
+            user_set_adapter_mode = ADAPTER_MODE_SLEEP;
+            writeEEPROMbyte(MODE_START,user_set_adapter_mode);
             g_EvseController.SetAutomaticMode(0);
             break;
           default:
@@ -1307,10 +1387,11 @@ void handleRapiR() {
             break;
           case 'L': // service level
             uint8_t level;
-            if ((uint8_t)rapi[4] > 48 && (uint8_t) rapi[4] < 51){
-                level = (uint8_t)rapi[4] - 48;    
-                g_EvseController.SetSvcLevel(level);
-            }
+            if ((evse_type != JUICEBOX) || !solar_evse)
+              if ((uint8_t)rapi[4] > 48 && (uint8_t) rapi[4] < 51){
+                  level = (uint8_t)rapi[4] - 48;    
+                  g_EvseController.SetSvcLevel(level);
+              }
             break;        
           case 'V': // vent required
             g_EvseController.EnableVentReq(rapi[4] == '0' ? 0 : 1);
@@ -1358,7 +1439,6 @@ void handleCfg() {
   String qconsumed = server.arg("consumed");
   String qgenerated = server.arg("generated");
   String qdevice = server.arg("device");
-  String qnoMQTT = server.arg("nomqtt");
   String mem_check,tmp;
 
   saved_pm_mac_address = readEEPROM(PM_MAC_START, PM_MAC_MAX_LENGTH);
@@ -1432,18 +1512,6 @@ void handleCfg() {
       if (sw_config != qswconfig) {   
         writeEEPROM(SW_CONFIG_START, SW_CONFIG_MAX_LENGTH, qswconfig);
         sw_config = qswconfig;
-        delay(10);
-      }
-    }
-    uint8_t temp;
-    temp = qnoMQTT.toInt();
-    if (temp != no_mqtt){
-      writeEEPROMbyte(NO_MQTT_START,temp);
-      no_mqtt = temp;
-      if (no_mqtt == 1){
-        client.disconnect();
-        server2_down = true;
-        g_EvseController.SetAutomaticMode(0);
       }
     }
   }
@@ -1489,7 +1557,7 @@ void handleCfg() {
         rebootIntoAPMode();
       }
       else
-        ESP.reset();
+        reboot = 1;
       //Serial.println(WiFi.getMode());
     }
   }
@@ -1508,8 +1576,7 @@ void handleCfg() {
     s += "<P>Rebooting now...please wait</P>";
     s += "</FORM></BODY></HTML>";
     server.send(200, "text/html", s);
-    delay(1500);
-    ESP.reset(); 
+    reboot = 1; 
   }
   if (qsid == "not chosen"){
      s += "<P><B>Warning.</B> No network selected</P>";
@@ -1518,6 +1585,7 @@ void handleCfg() {
   else {
       generated_power = 0;  //reset any persistant data from MQTT when anything changes
       consumed_power = 0;   //reset any persistant data from MQTT when anything changes
+      extra_power = 0;
       s += "<P>Saving to memory...please wait</P>";
    }
   s += "</FORM></BODY></HTML>";
@@ -1547,11 +1615,7 @@ void handleRst() {
   s += "</BODY></HTML>";
   resetEEPROM(0, EEPROM_SIZE);
   server.send(200, "text/html", s);
-  client.disconnect();
-  delay(1000);
-  //WiFi.disconnect();
-  //delay(500);
-  ESP.reset();
+  reboot = 1;
 }
 
 void handleRst2() {
@@ -1564,94 +1628,114 @@ void handleRst2() {
   s += "<P>Please wait about 15 seconds</P>";
   s += "</BODY></HTML>";
   server.send(200, "text/html", s);
-  client.disconnect();
-  delay(1000);
-  //WiFi.disconnect();
-  //delay(500);
-  ESP.reset();
+  reboot = 1;
 }
 
 void handleDbg() {
   String s, hStr;
   header1(s);
   if (server.arg("submit") == "Clear Reboot Counter")
-      s += "<META HTTP-EQUIV='refresh' CONTENT='1; URL=/dbg'>"; 
-  header2("Debug Info", hStr);
+    s += "<META HTTP-EQUIV='refresh' CONTENT='1; URL=/dbg'>";
+  else if (server.arg("submit") == "Check for Updates")
+    s += "<META HTTP-EQUIV='refresh' CONTENT='2; URL=/dbg'>";
+  header2("Debug for " + String(WiFi.macAddress()),hStr);
   s += hStr;
-  if (server.arg("submit") == "Clear Reboot Counter"){
-    boot_count = 0;
-    writeEEPROMbyte(BOOT_START,boot_count);
-    s += "<P STYLE='COLOR:#00A000'>Clearing...Please wait!</P>";
+
+  if (server.arg("submit") == "Check for Updates"){
+    firmwareUpdateCheck(1);
+    s += "<P STYLE='COLOR:#00A000'>No Updates Available! Please wait...</P>"; 
   }
-  s += "<P>Reboot count is ";
-  s += boot_count;
-  s += " time(s)</P>";
-  s += "<FORM ACTION='/dbg'>";
-  s += "<P>&nbsp;&nbsp;<INPUT TYPE=submit NAME='submit' VALUE='Clear Reboot Counter'></P>";
-  s += "</FORM>";
-  s += "<P>Unplugged count when awake is ";
-  s += unplugged_count;
-  s += "</P>";
-  s += "<P>Unplugged high value is ";
-  s += unplugged_hi;
-  s += "</P>";
-  s += "<P>Unplugged low value is ";
-  s += unplugged_lo;
-  s += "</P>";
-  s += "<P>Plugged in and awaken count is ";
-  s += plugged_in_count;
-  s += "</P>";
-  s += "<P>Plugged in high value is ";
-  s += plugged_in_hi;
-  s += "</P>";
-  s += "<P>Plugged in low value is ";
-  s += plugged_in_lo;
-  s += "</P>";
-  s += "<P>Charging count is ";
-  s += charge_count;
-  s += "</P>";
-  s += "<P>Charging high value is ";
-  s += charge_hi;
-  s += "</P>";
-  s += "<P>Charging low value is ";
-  s += charge_lo;
-  s += "</P>";
-  s += "<P>Proximity pilot in EVSE handle value is ";
-  s += sample_pp;
-  s += "</P>";
-  s += "<FORM ACTION='/dbgR'>";
-  s += "<P>Configuration ";
-  s += "<INPUT TYPE='radio' NAME='solar_evse' VALUE='1'";
-  if (solar_evse)
-    s += " CHECKED";
-  s += ">SolarEVSE <INPUT TYPE='radio' NAME='solar_evse' VALUE='0'";
-  if (!solar_evse)
-    s += " CHECKED";
-  s += ">SolarAdapter</P>";
-  s += "<P>Proximity signaling ";
-  s += "<INPUT TYPE='radio' NAME='skip_pp' VALUE='1'";
-  if (skip_pp)
-    s += " CHECKED";
-  s += ">Skip PP <INPUT TYPE='radio' NAME='skip_pp' VALUE='0'";
-  if (!skip_pp)
-    s += " CHECKED";
-  s += ">Check PP</P>";
-  s += "<P>Allow ON temporarily when turning on auto tracking ";
-  s += "<INPUT TYPE='radio' NAME='allowon' VALUE='1'";
-  if (allow_on_temporarily)
-    s += " CHECKED";
-  s += ">Allow <INPUT TYPE='radio' NAME='allowon' VALUE='0'";
-  if (!allow_on_temporarily)
-    s += " CHECKED";
-  s += ">Don't Allow</P>";
-  s += "<P>Pilot current is set to ";
-  s += pilot;
-  s += " A</P>";
-  s += "<BR><INPUT TYPE=submit VALUE='    Save    '>";
-  s += "</FORM>";
-  s += "&nbsp;<TABLE><TR>";
-  s += "<TD><FORM ACTION='/'><INPUT TYPE=submit VALUE='    Cancel    '></FORM></TD>";
-  s += "</TR></TABLE>";
+  if (server.arg("submit") != "Check for Updates"){
+    if (server.arg("submit") == "Clear Reboot Counter"){
+      boot_count = 0;
+      writeEEPROMbyte(BOOT_START,boot_count);
+      s += "<P STYLE='COLOR:#00A000'>Clearing...Please wait!</P>";
+    }
+    s += "<P>Reboot count is ";
+    s += boot_count;
+    s += " time(s)</P>";
+    s += "<FORM ACTION='/dbg'>";
+    s += "<P>&nbsp;&nbsp;<INPUT TYPE=submit NAME='submit' VALUE='Clear Reboot Counter'></P>";
+    s += "</FORM>";
+    s += "<P>Unplugged count when awake is ";
+    s += unplugged_count;
+    s += "</P>";
+    s += "<P>Unplugged high value is ";
+    s += unplugged_hi;
+    s += "</P>";
+    s += "<P>Unplugged low value is ";
+    s += unplugged_lo;
+    s += "</P>";
+    s += "<P>Plugged in and awaken count is ";
+    s += plugged_in_count;
+    s += "</P>";
+    s += "<P>Plugged in high value is ";
+    s += plugged_in_hi;
+    s += "</P>";
+    s += "<P>Plugged in low value is ";
+    s += plugged_in_lo;
+    s += "</P>";
+    s += "<P>Charging count is ";
+    s += charge_count;
+    s += "</P>";
+    s += "<P>Charging high value is ";
+    s += charge_hi;
+    s += "</P>";
+    s += "<P>Charging low value is ";
+    s += charge_lo;
+    s += "</P>";
+    s += "<P>Proximity pilot in EVSE handle value is ";
+    s += sample_pp;
+    s += "</P>";
+    s += "<FORM ACTION='/dbgR'>";
+    s += "<P>Configuration ";
+    s += "<INPUT TYPE='radio' NAME='solar_evse' VALUE='1'";
+    if (solar_evse)
+      s += " CHECKED";
+    s += ">SolarEVSE <INPUT TYPE='radio' NAME='solar_evse' VALUE='0'";
+    if (!solar_evse)
+      s += " CHECKED";
+    s += ">SolarAdapter</P>";
+    s += "<P>EVSE type ";
+    s += "<INPUT TYPE='radio' NAME='type' VALUE='1'";
+    if (evse_type == JUICEBOX)
+      s += " CHECKED";
+    s += ">JuiceBox <INPUT TYPE='radio' NAME='type' VALUE='0'";
+    if (evse_type == 0)
+      s += " CHECKED";
+    s += ">Generic</P>";
+    s += "<P>Proximity signaling ";
+    s += "<INPUT TYPE='radio' NAME='skip_pp' VALUE='1'";
+    if (skip_pp)
+      s += " CHECKED";
+    s += ">Skip PP <INPUT TYPE='radio' NAME='skip_pp' VALUE='0'";
+    if (!skip_pp)
+      s += " CHECKED";
+    s += ">Check PP</P>";
+    s += "<P>Pilot current is set to ";
+    s += pilot;
+    s += " A</P>";
+    if (alt_set_current < MIN_CURRENT_CAPACITY_J1772) {
+      s += "<P>Detected EVSE max current is ";
+      s += set_current;   
+      s += " A</P>";
+    }
+    if (evse_type == JUICEBOX)
+      s += "<P>EVSE status string is " + received_from_evse + "</P>";
+    s += "<P><LABEL>Enter Max Current for EVSE (";
+    s += String(MIN_CURRENT_CAPACITY_J1772 - 1) + " or less for autodetect) </LABEL><INPUT TYPE='number' ID='altc' NAME='altc' MIN='0' MAX='";
+    if (g_EvseController.GetCurSvcLevel() == 1){
+      s += String(MAX_CURRENT_CAPACITY_L1) + "' VALUE='";
+    }
+    else {
+      s += String(MAX_CURRENT_CAPACITY_L2) + "' VALUE='";
+    }
+    s += alt_set_current;
+    s += "'>&nbsp;A</P>";
+    for (uint16_t k = 0; k < strlen_P(m_updates); k++) {
+      s += char(pgm_read_byte_near(m_updates + k));
+    }
+  }
   s += "</BODY>";
   s += "</HTML>";
   server.send(200, "text/html", s);
@@ -1660,28 +1744,38 @@ void handleDbg() {
 void handleDbgR() {
   uint8_t tmp;
   String s, hStr;
-  uint8_t reboot = 0;
   String sSolar_evse = server.arg("solar_evse");
+  String sType = server.arg("type");
   String sSkip_pp = server.arg("skip_pp");
-  String sAllowon = server.arg("allowon");
-  String sSetcurrent = server.arg("setcurrent");
+  String sAltc = server.arg("altc");
+
+  tmp = sAltc.toInt();
+  if (alt_set_current != tmp){
+    alt_set_current = tmp;
+    unplug_time = 6;              //needed to take into effect immediately
+    immediate_status_update = true; //needed take into effect immediately
+    writeEEPROMbyte(ALT_SET_CURRENT_START, tmp);
+  } 
   
   tmp = sSolar_evse.toInt();
   if (tmp != solar_evse){
     reboot = 1;
-    writeEEPROM(SOLAR_EVSE_START, SOLAR_EVSE_MAX_LENGTH, sSolar_evse);
+    writeEEPROMbyte(SOLAR_EVSE_START, tmp);
+    if (tmp == 0) {     //solar adapter then automatically set type to generic
+      writeEEPROMbyte(EVSE_TYPE_START, 0);  
+    }
+  }
+
+  tmp = sType.toInt();
+  if (tmp != evse_type){
+    writeEEPROMbyte(EVSE_TYPE_START, tmp);
+    reboot = 1;
   }
 
   tmp = sSkip_pp.toInt();
   if (tmp != skip_pp){
     skip_pp = tmp;
     writeEEPROMbyte(SKIP_PP_START,tmp);
-  }
-
-  tmp = sAllowon.toInt();
-  if (tmp != allow_on_temporarily){
-    allow_on_temporarily = tmp;
-    writeEEPROMbyte(ALLOW_ON_START,tmp);
   }
    
   header1(s);
@@ -1698,13 +1792,6 @@ void handleDbgR() {
   }
   s += "</BODY></HTML>";
   server.send(200, "text/html", s);
-  if (reboot){
-    client.disconnect();
-    delay(1000);
-    //WiFi.disconnect();
-    //delay(500);
-    ESP.reset();
-  }
 }
 
 void encodeString(String& toEncode) {
@@ -1762,16 +1849,28 @@ void handleAdvanced() {
       s += " CHECKED";
     s += ">NO</P>";
   
-    s += "<P>Start up in sleep mode <INPUT TYPE='radio' NAME='start_sleep' VALUE='1'";
+    s += "<P>Always start up in sleep mode after reboot or power loss <INPUT TYPE='radio' NAME='start_sleep' VALUE='1'";
     if (g_EvseController.IsStartSleep())
       s += " CHECKED";
     s += ">YES  <INPUT TYPE='radio' NAME='start_sleep' VALUE='0'";
     if (!g_EvseController.IsStartSleep()) //no
       s += " CHECKED";
     s += ">NO* </P>";
+    s += "<P>Turn ON temporarily during auto tracking to align priority";
+    s += "<INPUT TYPE='radio' NAME='allowon' VALUE='1'";
+    if (allow_on_temporarily)
+      s += " CHECKED";
+    s += ">YES <INPUT TYPE='radio' NAME='allowon' VALUE='0'";
+    if (!allow_on_temporarily)
+      s += " CHECKED";
+    s += ">NO* </P>";
     s +=  "<P><LABEL>Minimum Turn On Power for ";
     s += deviceName();
-    s += " is (720 - 9,600) </LABEL><INPUT TYPE='number' ID='ipower' NAME='ipower' MIN='720' MAX='9600' VALUE='";
+    String str = String (g_EvseController.GetCurSvcLevel()*SPLIT_PHASE_VOLTAGE*MIN_CURRENT_CAPACITY_J1772);
+    String str1 = String (g_EvseController.GetCurSvcLevel()*SPLIT_PHASE_VOLTAGE*set_current);
+    if (set_current < MIN_CURRENT_CAPACITY_J1772)
+      str1 = String (g_EvseController.GetCurSvcLevel()*SPLIT_PHASE_VOLTAGE*MIN_CURRENT_CAPACITY_J1772 );
+    s += " is (" + str + " - " + str1 + ") </LABEL><INPUT TYPE='number' ID='ipower' NAME='ipower' MIN='" + str + "' MAX='" + str1 + "' VALUE='";
     s += ipower;
     s += "'>&nbsp;W</P>";
   }
@@ -1798,7 +1897,7 @@ void handleAdvanced() {
   s += "<INPUT TYPE=submit VALUE='    Save    '>";
   s += "</FORM>";
   s += "<BR><TABLE>";
-  if (!g_EvseController.IsBypassMode() && !no_mqtt){
+  if (!g_EvseController.IsBypassMode() && !no_mqtt && !server2_down){
     s += "<TR><TD><FORM ACTION='/data'><INPUT TYPE='submit' VALUE=' Show Data '></FORM></TD>";
     s += "<TD><FORM ACTION='/commands'><INPUT TYPE='submit' VALUE='Show Commands'></FORM></TD></TR>";
   }
@@ -1817,6 +1916,7 @@ void handleAdvancedR() {
   String sLocation = server.arg("loc");
   String sIpower = server.arg("ipower");
   String sTzone = server.arg("tzone");
+  String sAllowon = server.arg("allowon");
   uint8_t tmp;
 
   if (location_name != sLocation) {
@@ -1833,7 +1933,7 @@ void handleAdvancedR() {
   if (!g_EvseController.IsBypassMode()){
     if (ipower != sIpower.toInt()){
       ipower = sIpower.toInt();
-      saveWord(ipower,IPOWER_START);
+      writeEEPROMword(IPOWER_START,ipower);
     }   
     if (g_EvseController.IsStartSleep() != sStart_sleep.toInt()){
       if (sStart_sleep == "1")
@@ -1852,6 +1952,11 @@ void handleAdvancedR() {
         g_EvseController.EnableVentReq(1);    // vent check
       else
          g_EvseController.EnableVentReq(0);
+    }    
+    tmp = sAllowon.toInt();
+    if (tmp != allow_on_temporarily){
+      allow_on_temporarily = tmp;
+      writeEEPROMbyte(ALLOW_ON_START,tmp);
     }
   }
   if (g_EvseController.IsBypassMode() != sAdapter_bypass.toInt()){
@@ -1880,15 +1985,15 @@ void handleOnR() {
   s += hStr;
   if (!adapter_enabled) {
     g_EvseController.Enable();
-    timer_enabled = 0;
-    adapter_mode = 0;
-    writeEEPROMbyte(MODE_START,adapter_mode);
+    setDelayTimer(0);
+    user_set_adapter_mode = ADAPTER_MODE_ENABLED;
+    writeEEPROMbyte(MODE_START,user_set_adapter_mode);
     g_EvseController.SetAutomaticMode(0);
   }
   else {
     g_EvseController.Sleep();
-    adapter_mode = 1;
-    writeEEPROMbyte(MODE_START,adapter_mode);
+    user_set_adapter_mode = ADAPTER_MODE_SLEEP;
+    writeEEPROMbyte(MODE_START,user_set_adapter_mode);
     g_EvseController.SetAutomaticMode(0);
   }
   for (uint16_t k = 0; k < strlen_P(m_success); k++) {
@@ -1923,24 +2028,29 @@ void updatePluggedInStatus() {
         plugged_in = 0;
         digitalWrite(PLUG_IN, LOW);
       } 
-    if ((pre_plugged_in != plugged_in) && allow_on_temporarily){
-        if (plugged_in && g_EvseController.IsAutomaticMode() && EVSE_READY){ //turn on full power when plugged in so that auto tracking will adjust to proper priority
+    if (pre_plugged_in != plugged_in) {           //plug in or out transition occurred
+      Timer12 = millis();   //reset LED timeout 
+      if (allow_on_temporarily) {
+        if (plugged_in && g_EvseController.IsAutomaticMode() && EVSE_READY){ //turn on power when plugged in so that auto tracking will adjust to proper priority
           forced_reset_priority = true;
           g_EvseController.Enable();
-          g_EvseController.SetCurrentCapacity(set_current,1);
+          g_EvseController.SetCurrentCapacity(MIN_CURRENT_CAPACITY_J1772,1);
         }
-        pre_plugged_in = plugged_in;
+      }
+      pre_plugged_in = plugged_in;
     }
  }
 
 void setHiAmpSetpoint(uint8_t amps) {
-  hi_amp_setpoint = amps;
-  //Serial.println(sHi_amp_setpoint);
-  writeEEPROMbyte(HI_AMP_SETPOINT_START, amps);
-  saved_hi_amp_setpoint = amps;
-  immediate_status_update = true;
-  if (g_EvseController.IsAutomaticMode())
-    forced_reset_priority = true;
+  if (EVSE_READY && (amps >= MIN_CURRENT_CAPACITY_J1772) && (amps <= set_current)) {
+    hi_amp_setpoint = amps;
+    //Serial.println(sHi_amp_setpoint);
+    writeEEPROMbyte(HI_AMP_SETPOINT_START, amps);
+    saved_hi_amp_setpoint = amps;
+    immediate_status_update = true;
+    if (g_EvseController.IsAutomaticMode())
+      forced_reset_priority = true;
+  }
 }
 
 void handleLimitsR() {
@@ -1991,6 +2101,7 @@ void handleSetPilotR() {
 void handleAutoTrackingSettingsR() {
   String s, hStr;
   String sHi_amp_setpoint = server.arg("hiset");
+  String qwait = server.arg("wait_time");
   uint8_t tmp;
   
   header1(s);
@@ -2008,6 +2119,10 @@ void handleAutoTrackingSettingsR() {
   if (hi_amp_setpoint != tmp){
     setHiAmpSetpoint(tmp);
   }
+  if (on_off_wait_time != qwait.toInt()) {
+    on_off_wait_time = qwait.toInt();   
+    writeEEPROMword(TRANSITION_WAIT_START,on_off_wait_time);
+  }
   if (!g_EvseController.IsAutomaticMode())
     g_EvseController.SetAutomaticMode(1);
   for (uint16_t k = 0; k < strlen_P(m_success); k++) {
@@ -2018,20 +2133,48 @@ void handleAutoTrackingSettingsR() {
 
 void updateSAStatus() {
   unsigned long elapsed_time_since_recorded;
-  //if (!g_EvseController.IsBypassMode()){
+  if (reboot == 1){
+    boot_count--;
+    writeEEPROMbyte(BOOT_START,boot_count);
+    client.disconnect();
+    delay(1000);
+    ESP.restart();
+  }
   if ((millis() - Timer3) >= SA_STATUS_UPDATE_RATE || immediate_status_update) {
+    if (immediate_status_update){
+      immediate_status_update = false;
+      publish_immediately = true;
+    }
     Timer3 = millis();
+    if (ipower < g_EvseController.GetCurSvcLevel()*SPLIT_PHASE_VOLTAGE*MIN_CURRENT_CAPACITY_J1772)
+      ipower =  g_EvseController.GetCurSvcLevel()*SPLIT_PHASE_VOLTAGE*MIN_CURRENT_CAPACITY_J1772;
     adapter_state = getAdapterState();
     if (adapter_state == ADAPTER_STATE_C){
       elapsed_time_since_recorded = g_EvseController.GetElapsedChargeTime();
-      kilowatt_seconds_accum = kilowatt_seconds_accum + (elapsed_time_since_recorded-recorded_elapsed_time)*g_EvseController.GetCurSvcLevel()*3*pilot/25;
+      if (header_received == "$TM")   //for version 1
+        kilowatt_seconds_accum = kilowatt_seconds_accum + (elapsed_time_since_recorded-recorded_elapsed_time)*evse_voltageX10*evse_currentX10*evse_pfX1000/2500000.0;
+      else
+        kilowatt_seconds_accum = kilowatt_seconds_accum + (elapsed_time_since_recorded-recorded_elapsed_time)*g_EvseController.GetCurSvcLevel()*3*pilot/25;
       recorded_elapsed_time = elapsed_time_since_recorded;
     }
     else {
       recorded_elapsed_time = 0;
       kilowatt_seconds_accum = 0;
     }
-    updatePluggedInStatus();
+    if (g_EvseController.GetCurSvcLevel() == 1){
+      if (alt_set_current > MAX_CURRENT_CAPACITY_L1){
+        alt_set_current = MAX_CURRENT_CAPACITY_L1;
+        unplug_time = 6;              //needed to take into effect immediately
+        writeEEPROMbyte(ALT_SET_CURRENT_START, alt_set_current);
+      }
+    }
+    else {
+      if (alt_set_current > MAX_CURRENT_CAPACITY_L2){
+        alt_set_current = MAX_CURRENT_CAPACITY_L2;
+        unplug_time = 6;              //needed to take into effect immediately
+        writeEEPROMbyte(ALT_SET_CURRENT_START, alt_set_current);
+      }
+    }
     if (plugged_in){
       set_current = checkEVSEStatus();
       unplug_time = 1;
@@ -2042,7 +2185,8 @@ void updateSAStatus() {
     }
     else 
       unplug_time++;
-    if (set_current != pre_set_current){
+    if (set_current != pre_set_current){    //set current changed, need make sure confirm others are within limits
+      Timer12 = millis();   //reset LED timeout
       if (set_current > MAX_CURRENT_CAPACITY_L2)
         set_current = MAX_CURRENT_CAPACITY_L2;
       if (EVSE_READY && !g_EvseController.IsAutomaticMode()){
@@ -2054,13 +2198,6 @@ void updateSAStatus() {
           hi_amp_setpoint = saved_hi_amp_setpoint; 
         else
           hi_amp_setpoint = set_current;  //don't save
-      }
-      if (allow_on_temporarily && (pre_set_current < MIN_CURRENT_CAPACITY_J1772) && EVSE_READY){
-        if (g_EvseController.IsAutomaticMode() && plugged_in){ //turn on full power when EVSE is plugged in so that auto tracking will adjust to proper priority
-          forced_reset_priority = true;
-          g_EvseController.Enable();
-          g_EvseController.SetCurrentCapacity(set_current,1);
-        }
       }
       pre_set_current = set_current;
     }
@@ -2145,8 +2282,7 @@ void handleOffTimerR() {
   s += "<META HTTP-EQUIV='refresh' CONTENT='0; url=/'>";
   header2("Confirmation", hStr);
   s += hStr;
-  timer_enabled = 0;
-  writeEEPROMbyte(TIMER_ENABLED_START,timer_enabled);
+  setDelayTimer(0);
   for (uint16_t k = 0; k < strlen_P(m_success); k++) {
     s += char(pgm_read_byte_near(m_success + k));
   }
@@ -2347,10 +2483,9 @@ void handleDelayTimerR() {
     stop_min = tmp;
   }
   if (IsTimerValid()){
-    timer_enabled = 1;
+    setDelayTimer(1);
     g_EvseController.SetLimitSleep(0);
     g_EvseController.SetAutomaticMode(0,0);
-    writeEEPROMbyte(TIMER_ENABLED_START,timer_enabled);
     header1(s);
     s += "<META HTTP-EQUIV='refresh' CONTENT='0; url=/'>";
     header2("Confirmation", hStr);
@@ -2359,8 +2494,7 @@ void handleDelayTimerR() {
     s += "<P>Success!</P>";
   }
   else {
-    timer_enabled = 0;
-    writeEEPROMbyte(TIMER_ENABLED_START,timer_enabled);
+    setDelayTimer(0);
     header1(s);
     s += "<META HTTP-EQUIV='refresh' CONTENT='0; url=/'>";
     header2("Confirmation", hStr);
@@ -2489,8 +2623,7 @@ void handleAutoTrackingSchedule() {
       s += "<P><SPAN STYLE='COLOR:#FF0000'>Error! Start and Stop times are the same</SPAN></P>";
     }
   }
-  if (start_AT != stop_AT)
-    setAutoSchedule(1);
+  setAutoSchedule(1);
   s += "<P><INPUT TYPE=submit NAME='save' VALUE='    Save    '></P>";
   s += "</FORM><FORM ACTION='/'>";
   s += "<P><INPUT TYPE=submit VALUE='    Done    '></P>";
@@ -2521,6 +2654,9 @@ void handleAutoTrackingSettings() {
        s += "<OPTION VALUE='" + String(index) + "'>" + String(index) + "</OPTION>";
   }
   s += "</SELECT>&nbsp;A</P>";
+  s += "<P><LABEL>Wait time to adjust charging after turning on - EV dependant reaction time (15-240 seconds) </LABEL><INPUT TYPE='number' ID='wait_time' NAME='wait_time' MIN='15' MAX='240' VALUE='";
+  s += on_off_wait_time;  
+  s += "'></P>";
   for (uint16_t k = 0; k < strlen_P(m_submit); k++) {
     s += char(pgm_read_byte_near(m_submit + k));
   }
@@ -2537,10 +2673,17 @@ void handleHome(){
   char tmpStr[40];
   String sFirst = "0";
   bool refresh = false;
-  if (server.arg("level") == "Change to Level 1")
+  Timer12 = millis();   //reset LED timeout
+  if (server.arg("level") == "Change to Level 1") {
     g_EvseController.SetSvcLevel(1);
-  else if (server.arg("level") == "Change to Level 2")
-    g_EvseController.SetSvcLevel(2);
+    ipower = readEEPROMword(IPOWER_START);          //reload ipower
+    refresh = true;
+  }
+  else if (server.arg("level") == "Change to Level 2") {
+    g_EvseController.SetSvcLevel(2);                              
+    ipower = readEEPROMbyte(IPOWER_START);        //reload ipower
+    refresh = true;
+  }
   //get pilot setting and EVSE flag
   updateFlag();
   if (server.arg("schedule_AT") == "Turn OFF Schedule"){
@@ -2558,33 +2701,52 @@ void handleHome(){
     s += "<P><SPAN STYLE='COLOR:#00A000'>Saving...Please wait!</SPAN></P>";
   // for testing set_current = 48;
   s += "<P><B>EV Charger (EVSE) Status</B></P>";
-  if (!g_EvseController.IsBypassMode() && EVSE_READY){
-    s += "<P><SPAN STYLE='COLOR:#00A000'>EVSE is ready and the max current is ";
+  if (EVSE_READY && (evse_state != 5)){
+    if (override_evse_set_pilot && !g_EvseController.IsBypassMode())
+      s += "<P><SPAN STYLE='COLOR:#00A000'>EVSE is ready and the max current has been changed to ";
+    else
+      s += "<P><SPAN STYLE='COLOR:#00A000'>EVSE is ready and the max current is ";
     s += set_current;
     s += " A</SPAN></P>";
   }
-  else if (!g_EvseController.IsBypassMode() && !EVSE_READY){
-    s += "<P><SPAN STYLE='COLOR:#FFB000'>EVSE is not ready or not connected to the ";
-    s += deviceName();
-    s += ", please wait while retrying, or connect</SPAN></P>";
+  else { 
+    if ((evse_type == JUICEBOX) && received_error != "")
+      s += "<P><SPAN STYLE='COLOR:#FF0000'>EVSE is not ready, the error is " + received_error;
+    else if (evse_state == 5)
+      s += "<P><SPAN STYLE='COLOR:#FF0000'>EVSE is reporting an error";
+    else {
+      s += "<P><SPAN STYLE='COLOR:#FFB000'>EVSE is not ready or not connected to the ";
+      s += deviceName();
+      s += ", please investigate or check the connection";
+    }
+    s += "</SPAN></P>";
   }
-  else{
-    s += "<P><SPAN STYLE='COLOR:#B000B0'>EVSE state is unknown since the ";
-    s += deviceName();
-    s += " is in Bypass Mode</SPAN></P>"; 
-  }
+  if (evse_tempS != "")
+    s += evse_tempS;
+  if (evse_state == 2)
+    s += "<P>EVSE is now charging</P>";
   if (!g_EvseController.IsBypassMode()){
-    s += "<FORM ACTION='/'>";
+    if ((evse_type != JUICEBOX) || !solar_evse)
+      s += "<FORM ACTION='/'>";
     s += "<P>EVSE is a Level ";
      if (g_EvseController.GetCurSvcLevel() == 1){
        s += "1 (120 Vac)";
-       s += "&nbsp;&nbsp;<INPUT TYPE=submit NAME='level' VALUE='Change to Level 2'></P>";
+       if ((evse_type != JUICEBOX) || !solar_evse)
+        s += "&nbsp;&nbsp;<INPUT TYPE=submit NAME='level' VALUE='Change to Level 2'></P>";
+       else
+        s+= "</P>";
      }
      else {
        s += "2 (240 Vac)";
-       s += "&nbsp;&nbsp;<INPUT TYPE=submit NAME='level' VALUE='Change to Level 1'></P>";
+       if ((evse_type != JUICEBOX) || !solar_evse)
+        s += "&nbsp;&nbsp;<INPUT TYPE=submit NAME='level' VALUE='Change to Level 1'></P>";
+       else
+        s+= "</P>";
      }
-    s += "</FORM>";
+    if ((evse_type != JUICEBOX) || !solar_evse)
+      s += "</FORM>";
+    if (lifetime_energy > 10)
+      s += "<P>The lifetime energy is " + String(lifetime_energy/1000.0, 2) + " kWh </P>";
   }
   uint8_t display_connected_indicator = 0;
   s += "<P>-----------------------------------------------</P>";
@@ -2615,8 +2777,14 @@ void handleHome(){
       else
         sFirst += " minutes delivering about ";
       tmp = kilowatt_seconds_accum/3600.0;
-      sFirst += String(tmp,1) + " kWh at max current setting of ";
-      sFirst += String(pilot) + " A</SPAN></SPAN></P>";
+      if (header_received == "$TM"){   //for version 1
+        sFirst += String(tmp,1) + " kWh with a charge current of  ";
+        sFirst += String(evse_currentX10/10.0,1) + " A</SPAN></SPAN></P>";        
+      }
+      else {
+        sFirst += String(tmp,1) + " kWh at max current setting of ";
+        sFirst += String(pilot) + " A</SPAN></SPAN></P>";
+      }
       s += sFirst;
       break;
     case ADAPTER_STATE_D:
@@ -2675,7 +2843,7 @@ void handleHome(){
       display_connected_indicator = 1;
       break;
     default:
-      sFirst = "<P><SPAN STYLE='background-color: #FFB900'> Unknown state;</SPAN></P>";  //amber
+      sFirst = "<P><SPAN STYLE='background-color: #FFB900'> Unknown state</SPAN></P>";  //amber
       display_connected_indicator = 1;
       s += sFirst;
   }
@@ -2778,7 +2946,11 @@ void handleHome(){
           s += "</P>";
           s += "<P>&nbsp;&nbsp;&nbsp;Cycle completes when reaching ";
           s += hi_amp_setpoint;
-          s += "&nbsp;A</P><TABLE><TR>";
+          s += "&nbsp;A</P>";
+          s += "<P>&nbsp;&nbsp;&nbsp;Wait time for EV to start charging after turn on is ";
+          s += on_off_wait_time;
+          s += "&nbsp;secs</P>";
+          s += "<TABLE><TR>";
           s += "<TD><FORM ACTION='/atset'><INPUT TYPE=submit VALUE=' Change '></FORM></TD>";
           if (!schedule_AT){
             s += "<TD><FORM ACTION='/offtrackingR'><INPUT TYPE=submit VALUE='Turn OFF Auto Tracking'></FORM></TD>";
@@ -2841,7 +3013,7 @@ void handleHome(){
   }
   else
     if (adc_address != 0)
-      s += "<P>To change, see Advanced</P>";
+      s += "<P>You cannot control your EVSE with " + deviceName() + ". To change, see Advanced</P>";
 
   s += "<P>-----------------------------------------------</P>";
   s += "<P><B>Network Status</B></P>";
@@ -2851,22 +3023,19 @@ void handleHome(){
   if (!no_consumed_data_received && !no_mqtt){
     s += "<P><B>Power Status</B></P>";
     s += "<P>Extra power detected is ";
-    if (!(g_EvseController.IsAutomaticMode()) || ((extra_power >= turn_off_threshold) && (extra_power <= increase_threshold) && (adapter_state == ADAPTER_STATE_C)))
-       s += "<SPAN STYLE='COLOR:#00A000'>"; //green
-    else if ((extra_power <= turn_on_threshold) && (adapter_state != ADAPTER_STATE_C))
-       s += "<SPAN STYLE='COLOR:#FFB000'>"; //yellow
-    else if ((extra_power > turn_on_threshold) || (extra_power > increase_threshold) || (extra_power < turn_off_threshold && (adapter_state == ADAPTER_STATE_C)))
-       s += "<SPAN STYLE='COLOR:#FF0000'>"; //red
-    if (extra_power == 1 or extra_power == -1)
+    if (g_EvseController.IsAutomaticMode() && (selected_device_mac_address == WiFi.macAddress()) && (((extra_power < turn_off_threshold) && (adapter_state == ADAPTER_STATE_C)) || (extra_power > turn_on_threshold)))
+      s += "<SPAN STYLE='COLOR:#FF0000'>"; //red
+    else if (g_EvseController.IsAutomaticMode() && (selected_device_mac_address == WiFi.macAddress()) && (adapter_state == ADAPTER_STATE_C) && ((extra_power > increase_threshold) || (extra_power < decrease_threshold)))
+      s += "<SPAN STYLE='COLOR:#FFB000'>"; //yellow
+    else
+      s += "<SPAN STYLE='COLOR:#00A000'>"; //green
+       
+    if (extra_power == 1 || extra_power == -1)
       sprintf(tmpStr,"%d watt</SPAN></P>",extra_power);
     else
       sprintf(tmpStr,"%d watts</SPAN></P>",extra_power);
     s += tmpStr;
     if (g_EvseController.IsAutomaticMode()){
-      /*if (down_scan)
-        s += "<P>Scanning devices to save power...</P>";
-      else
-        s += "<P>Scanning devices to use more power...</P>";*/
       if (selected_device_mac_address == WiFi.macAddress()){
         s += "<P>Now adjusting this device</P>";
       }
@@ -2925,6 +3094,9 @@ void downloadEEPROM() {
     if (generated == "")
       generated = "solar";  //default is solar
     generatedTopic = base + generated;
+    alt_set_current = readEEPROMbyte(ALT_SET_CURRENT_START);
+    if (alt_set_current > MAX_CURRENT_CAPACITY_L2)
+      alt_set_current = 0;
     device = readEEPROMbyte(DEVICE_START);
     if (device > MAX_NUM_DEVICES)
       device = 0;
@@ -2942,19 +3114,16 @@ void downloadEEPROM() {
     connection_mode = readEEPROMbyte(START_AP_START);
     if (connection_mode > AP)
       connection_mode = AP;
-    adapter_mode = readEEPROMbyte(MODE_START);
-    if (adapter_mode > 1)
-      adapter_mode = 1;
+    user_set_adapter_mode = readEEPROMbyte(MODE_START);
+    if (user_set_adapter_mode > ADAPTER_MODE_SLEEP)
+      user_set_adapter_mode = ADAPTER_MODE_SLEEP;
     sw_config = readEEPROM(SW_CONFIG_START, SW_CONFIG_MAX_LENGTH);
     if (sw_config  != "a" && sw_config != "b")
       sw_config = "a";     //default to JSON
-    int16_t hi_byte = readEEPROMbyte(IPOWER_START) << 8;
-    ipower = hi_byte + readEEPROMbyte(IPOWER_START+1);
-    if (ipower < SPLIT_PHASE_VOLTAGE*MIN_CURRENT_CAPACITY_J1772)
-      ipower = SPLIT_PHASE_VOLTAGE*MIN_CURRENT_CAPACITY_J1772;
+    ipower = readEEPROMword(IPOWER_START);
     hi_amp_setpoint = readEEPROMbyte(HI_AMP_SETPOINT_START);
-    if (hi_amp_setpoint == 0)
-      hi_amp_setpoint = MAX_CURRENT_CAPACITY_L2;
+    if (hi_amp_setpoint < MIN_CURRENT_CAPACITY_J1772)
+      hi_amp_setpoint = MAX_CURRENT_CAPACITY_L1;
     saved_hi_amp_setpoint = hi_amp_setpoint;
 
     start_AT = readEEPROMbyte(START_AT_START);
@@ -2966,8 +3135,7 @@ void downloadEEPROM() {
     schedule_AT = readEEPROMbyte(SCHEDULE_AT_START);
     if (schedule_AT > 1)
       schedule_AT = 1;
-    tmp = readEEPROM(SOLAR_EVSE_START, SOLAR_EVSE_MAX_LENGTH);
-    solar_evse = tmp.toInt();
+    solar_evse = readEEPROMbyte(SOLAR_EVSE_START);
     if (solar_evse > 1)
       solar_evse = 1;
     start_hour = readEEPROMbyte(START_HOUR_START);
@@ -3000,9 +3168,17 @@ void downloadEEPROM() {
     skip_pp = readEEPROMbyte(SKIP_PP_START);
     if (skip_pp > 1)
       skip_pp = 1;
-    allow_on_temporarily == readEEPROMbyte(ALLOW_ON_START);
+    allow_on_temporarily = readEEPROMbyte(ALLOW_ON_START);
     if (allow_on_temporarily > 1)
       allow_on_temporarily = 0;
+    evse_type = readEEPROMbyte(EVSE_TYPE_START);
+    if (evse_type > 1)
+      evse_type = 0;
+    if (evse_type == JUICEBOX)
+      g_EvseController.SetSvcLevel(2);
+    on_off_wait_time = readEEPROMword(TRANSITION_WAIT_START);
+    if (on_off_wait_time < 15 || on_off_wait_time > 240)  //in seconds
+      on_off_wait_time = 15;
   }
 }
 
@@ -3024,19 +3200,24 @@ void setup() {
   Wire.begin(5,4);                 // Initialize adc, used to sample the pilot voltage
 #endif
   Wire.setClock(400000);        // default is 100kHz but need faster  
-  pinMode(EVSE_PILOT,INPUT_PULLUP);
-  Serial.begin(115200,SERIAL_8N1,SERIAL_TX_ONLY);  //GPIO3 or RX Pin is used to decode PWM of the pilot for the EVSE
-  attachInterrupt(digitalPinToInterrupt(EVSE_PILOT), EvsePilotISR, CHANGE);
   EEPROM.begin(600);
-  char tmpStr[50];
-  downloadEEPROM();    
   // start the adapter related functions first before any network stuff in case there are delays
   g_EvseController.Init();  //sets up all the adapters initial parameters including start in sleep mode and bypass mode check
-  g_EvseController.Sleep();
+  delay(250);
+  downloadEEPROM(); 
+  if (evse_type == JUICEBOX) {
+    Serial.begin(115200,SERIAL_8N1,SERIAL_RX_ONLY);  //GPIO1 or TX Pin is used to decode PWM of the pilot for the EVSE
+    pilot_pin = EVSE_PILOT1; 
+  }
+  else {
+    Serial.begin(115200,SERIAL_8N1,SERIAL_TX_ONLY);  //GPIO3 or RX Pin is used to decode PWM of the pilot for the EVSE
+    pilot_pin = EVSE_PILOT3;
+  }
+  pinMode(pilot_pin,INPUT_PULLUP);
   g_EvseController.Update();
   delay(500);
-  if (!g_EvseController.IsStartSleep() && !g_EvseController.IsBypassMode()){
-    if (adapter_mode == 0)
+  if (!g_EvseController.IsStartSleep() && !g_EvseController.IsBypassMode() && !g_EvseController.IsAutomaticMode()){
+    if (user_set_adapter_mode == ADAPTER_MODE_ENABLED)
        g_EvseController.Enable();
   }
   //scan for ADC to make sure it's ready and determine which address is the ADC as part on PCB assy may be different (8 possible addresses)
@@ -3049,7 +3230,7 @@ void setup() {
       //Serial.println (i, DEC);
       adc_address = i;
       } 
-     delay (50);  // give devices time to recover
+     delay(50);  // give devices time to recover
   } // end of for loop
   if (adc_address == 0){
     //Serial.println ("ERROR, ADC is not responding.");
@@ -3104,7 +3285,6 @@ void setup() {
   server.on("/advR", handleAdvancedR);
   server.on("/data", handleShowData);
   server.on("/commands", handleShowCommands);
-  //server.on("/devices", handleShowConnectedDevices);
   server.on("/offtimerR", handleOffTimerR);
   server.on("/offtrackingR", handleOffTrackingR);
   server.on("/limits", handleLimits);
@@ -3126,16 +3306,18 @@ void setup() {
   Timer_zero = millis();
   Timer10 = millis();
   Timer11 = millis();
+  Timer12 = millis();
   Timer20 = millis();
   m_LastCheck = millis();
   start_time = micros();
   digitalWrite(RED_LED_0,HIGH);    //indicates done setting up
   immediate_status_update = false;  //need to clear this to allow assigned index to be updated first so that external UI is less confusing
   //Serial.println("Setup done");
+  
 }
 
 ICACHE_RAM_ATTR void EvsePilotISR() {
-  if (digitalRead(EVSE_PILOT) == HIGH) {
+  if (digitalRead(pilot_pin) == HIGH) {
     unsigned long tmp;
     tmp = micros();
     if (tmp > start_time)
@@ -3225,8 +3407,13 @@ void blinkRedLED() {
    }
 }
 
-void updateYellowLED() {  
-  if (((millis() - Timer6) >= FAST_BLINK_RATE) && WiFi.isConnected()) {
+void updateYellowLED() {
+  if (((millis() - Timer12) > LED_TIMEOUT) && WiFi.isConnected()) {
+    digitalWrite(RED_LED_0,HIGH);
+    digitalWrite(YELLOW_LED,HIGH);
+    return;
+  }
+  else if (((millis() - Timer6) >= FAST_BLINK_RATE) && WiFi.isConnected()) {
     if (connection_mode == STARTED_IN_AP){
       WiFi.softAPdisconnect(true);
     }
@@ -3330,33 +3517,22 @@ bool actualUpdate() {
   return false;
 }
 
-void firmwareUpdateCheck() {
-  if ((millis() - Timer2) >= (FIRMWARE_UPDATE_CHECK + factor*100)){
+void firmwareUpdateCheck(uint8_t now) {
+  if (((millis() - Timer2) >= (FIRMWARE_UPDATE_CHECK + factor*100)) || now){
     factor = random(200); 
-    Timer2 = millis();
-    if (!no_mqtt){
-      no_mqtt = 1;
-      client.disconnect();
-    }
-    
+    Timer2 = millis();  
     if (WiFi.isConnected()){   //check for fw updates
       //Serial.println("inside fw check");
       if (actualUpdate()){
-          boot_count --;    //OTA updates don't count, tracking only real reboots due to system overflow errors
-          writeEEPROMbyte(BOOT_START,boot_count);
-          delay(1000); 
-          ESP.reset();
+          reboot = 1;
       }
-      no_mqtt = readEEPROMbyte(NO_MQTT_START);
-      if (no_mqtt > 1)
-        no_mqtt = 1;
     }
   }
 }
 
 void processMQTTData() {
   if (received_pm_st){
-    StaticJsonDocument <256> doc1;
+    JsonDocument doc1;
     deserializeJson(doc1,pm_st_payload);
     consumed_power = doc1[consumed];
     consumed_data_status = 1;
@@ -3393,13 +3569,17 @@ void processMQTTData() {
       if (enabled_message != String(adapter_enabled)){
         if (enabled_message == "1"){
           g_EvseController.Enable();
-          adapter_mode = 0;
-          writeEEPROMbyte(MODE_START,adapter_mode);
+          if (user_set_adapter_mode != ADAPTER_MODE_ENABLED){
+            user_set_adapter_mode = ADAPTER_MODE_ENABLED;
+            writeEEPROMbyte(MODE_START,user_set_adapter_mode);
+          }
         }  
         else if (enabled_message == "0"){
            g_EvseController.Sleep();
-           adapter_mode = 1;
-           writeEEPROMbyte(MODE_START,adapter_mode);
+           if (user_set_adapter_mode != ADAPTER_MODE_SLEEP) {
+            user_set_adapter_mode = ADAPTER_MODE_SLEEP;
+            writeEEPROMbyte(MODE_START,user_set_adapter_mode);
+           }
         }
         g_EvseController.SetAutomaticMode(0);
       }
@@ -3412,10 +3592,24 @@ void processMQTTData() {
       }
       received_pilot = false; 
     }
+    if (received_schedule_AT){
+      if (schedule_AT_message != String(schedule_AT)){
+        setAutoSchedule(schedule_AT_message.toInt());
+      }
+      received_schedule_AT = false;
+    }
+    if (received_timer){
+      if (timer_message != String(timer_enabled)){
+        setDelayTimer(timer_message.toInt());
+      }
+      received_timer = false;
+    }
   }
   else {
     received_enabled = false;
     received_pilot = false;
+    received_schedule_AT = false;
+    received_timer = false;
   }
   if (received_bypass){
     if (bypass_message != String(g_EvseController.IsBypassMode())){
@@ -3425,7 +3619,7 @@ void processMQTTData() {
   }
   if (received_level){
     if (level_message != String(g_EvseController.GetCurSvcLevel())){
-      g_EvseController.SetSvcLevel(level_message.toInt());   
+      g_EvseController.SetSvcLevel(level_message.toInt()); 
     }
     received_level = false;
   }
@@ -3434,12 +3628,6 @@ void processMQTTData() {
       setHiAmpSetpoint(hiamp_message.toInt());
     }
     received_hiamp = false;
-  }
-  if (received_schedule_AT){
-    if (schedule_AT_message != String(schedule_AT)){
-      setAutoSchedule(schedule_AT_message.toInt());
-    }
-    received_schedule_AT = false;
   }
 }
 
@@ -3452,7 +3640,7 @@ void callback(char* topic, byte* payload, uint16_t length) {
  const char* PM_devs_topic = "2ms/PM/devs";
  /*for (uint16_t i=0;i<length;i++) {
   char receivedChar = (char)payload[i];
-  //Serial.print(receivedChar);
+  Serial.print(receivedChar);
   }*/
   //Serial.println();
   payload[length] = '\0';
@@ -3499,6 +3687,8 @@ void callback(char* topic, byte* payload, uint16_t length) {
   if (String(topic) == tmp2){
     pm_next_payload = payload;
     received_pm_next = true;
+    if (one_second == 0)
+      m_LastCheck = millis();   //sync the checkTimer function with receiving the next command which is used to determine when to do light sleep.  
   }
   tmp2 = base + "devs";               //need to processs as soon as possible as dev topics are asynchronous
   if (String(topic) == tmp2){
@@ -3526,12 +3716,13 @@ void callback(char* topic, byte* payload, uint16_t length) {
       bypass_message = message;
       received_bypass = true;
     }
-    tmp2 = base2 + "c/level";
-    if (String(topic) == tmp2){
-      level_message = message;
-      received_level = true;
+    if (evse_type != JUICEBOX) {
+      tmp2 = base2 + "c/level";
+      if (String(topic) == tmp2){
+        level_message = message;
+        received_level = true;
+      }
     }
-
     tmp2 = base2 + "c/hiamp";
     if (String(topic) == tmp2){
       hiamp_message = message;
@@ -3544,10 +3735,16 @@ void callback(char* topic, byte* payload, uint16_t length) {
       received_pilot = true;
     }
 
-    tmp2 = base2 + "c/schedAT";
+    tmp2 = base2 + "c/schedat";
     if (String(topic) == tmp2){
       schedule_AT_message = message;
       received_schedule_AT = true;
+    }
+    
+    tmp2 = base2 + "c/timer";
+    if (String(topic) == tmp2){
+      timer_message = message;
+      received_timer = true;
     }
   }
  //Serial.println();
@@ -3575,7 +3772,8 @@ boolean reconnect() {
     port = DEFAULTMPORT;
   }
   client.setServer(MQTTBroker.c_str(),port.toInt());
-  if (client.connect(tmp.c_str(),uName.c_str(),pWord.c_str())) {  
+  //mqtt_client_id, NULL, NULL, NULL, 0, false, NULL, true
+  if (client.connect(tmp.c_str(),uName.c_str(),pWord.c_str(), NULL, 0, false, NULL, true)) {  
     tmp2 = PM_subscription;
     client.subscribe(tmp2.c_str());  
     tmp2 = base2 + "c/#";
@@ -3588,11 +3786,10 @@ boolean reconnect() {
 void automaticTrackingUpdate() {
   //get max current allowable
   uint8_t maxamp;
-  uint8_t increment;
+  uint16_t increment;
   char tmpStr[20];
-  int16_t decrease_threshold;
   uint16_t power_step = g_EvseController.GetCurSvcLevel()*SPLIT_PHASE_VOLTAGE;
-  uint16_t min_power_on = g_EvseController.GetCurSvcLevel()*SPLIT_PHASE_VOLTAGE*MIN_CURRENT_CAPACITY_J1772;
+  uint16_t min_power_on = ipower;
   
   if (hi_amp_setpoint > set_current)
     maxamp = set_current;
@@ -3600,15 +3797,9 @@ void automaticTrackingUpdate() {
     maxamp = hi_amp_setpoint;
   
   if (offset >= 0){   // limit offset amount pulled from the grid
-    turn_on_threshold = min_power_on - offset;
-    if (offset >= power_step){
-      increase_threshold = 0;
-      decrease_threshold = -power_step;
-    }
-    else{ 
-      increase_threshold = power_step - offset;
-      decrease_threshold = -offset;
-    }     
+    turn_on_threshold = min_power_on - offset + 100;
+    increase_threshold = offset < power_step?(power_step - offset):0;  //limit to -offset or -powerstep depending on which is larger
+    decrease_threshold = -offset;   
     turn_off_threshold = -offset;
   }
   else{   //limit offset amount pushed to the grid
@@ -3617,12 +3808,36 @@ void automaticTrackingUpdate() {
     decrease_threshold = -power_step - offset; 
     turn_off_threshold = -min_power_on - offset; 
   }
+
+  if (((millis() - Timer4) > (transition*1000 + wait_for_power_change/2 + 1500)) && temporarily_done == 1){
+    publish_done = true;
+    temporarily_done = 0;
+    transition = 0;
+    Timer4 = millis();
+  }
+  // next 3 ifs are for the start timeout feature
+  if ((selected_device_mac_address == WiFi.macAddress()) && (received_time_on == 255) && (temporarily_done == 1 || start_timeout)){  //abort if returned eariler
+    start_timeout = false;
+    temporarily_done = 0;
+    publish_done = true;
+    transition = 0;
+  }
+  if ((selected_device_mac_address == WiFi.macAddress()) && (received_time_on != 255) && !start_timeout){
+    start_timeout = true;
+    Timeout_start_time = millis();
+  }
+  if (((millis() - Timeout_start_time) > (received_time_on * 1000)) && start_timeout){
+    g_EvseController.Sleep();
+    transition = 2;
+    Timer4 = millis();
+    start_timeout = false;
+    forced_reset_priority = true;
+  }
   if ((selected_device_mac_address == WiFi.macAddress()) && ready_to_start && (millis() - Timer4) > (transition*1000 + wait_for_power_change/2 + 1500)){
     Timer4 = millis();
     assigned_index = current_done_index;
     if ((!down_scan && HIGHER_PRIORITY_CONDITION) || (down_scan && LOWER_PRIORITY_CONDITION) || !EVSE_READY){
       publish_done = true;
-      selected_device_mac_address = "0";
       transition = 0;    
     } 
     else if (plugged_in && (g_EvseController.IsAutomaticMode() == 1)){     
@@ -3630,32 +3845,35 @@ void automaticTrackingUpdate() {
       //sprintf(tmpStr,"%d",extra_power);
       //Serial.print(tmpStr);
       //Serial.println();
-      
-      increment = 1 + abs((extra_power + offset)/(2*power_step));
       if ((adapter_enabled == 0) && (extra_power > turn_on_threshold) && !down_scan){  // turn on
-        g_EvseController.SetCurrentCapacity(MIN_CURRENT_CAPACITY_J1772,1);  //no save to eeprom
+        increment = (extra_power - turn_on_threshold)/(1.2*power_step);
+        g_EvseController.SetCurrentCapacity(MIN_CURRENT_CAPACITY_J1772 + increment,1);  //no save to eeprom
         g_EvseController.Enable();
-        transition = 18;
+        publish_done = true;    //temporarily indicate done so others can use up the power while waiting for car to start
+        temporarily_done = 1;
+        transition = on_off_wait_time; //was 18
         }
-      else if (adapter_enabled && (extra_power > increase_threshold) && (pilot < maxamp) && !down_scan){  // increase
+      else if (adapter_enabled && (extra_power > increase_threshold) && (pilot < maxamp)){  // increase
+        increment = 1 + (extra_power - increase_threshold)/(1.2*power_step);
         pilot += increment;
         if (pilot > maxamp)
           pilot = maxamp;
         g_EvseController.SetCurrentCapacity(pilot,1);  //no save to eeprom
-        transition = 4;
+        transition = 3; //was 4
       }
-      else if (adapter_enabled && (extra_power < decrease_threshold) && (pilot > MIN_CURRENT_CAPACITY_J1772) && down_scan){  // decrease
+      else if (adapter_enabled && (extra_power < decrease_threshold) && (pilot > MIN_CURRENT_CAPACITY_J1772)){  // decrease
+        increment = 1 + (decrease_threshold - extra_power)/(1.2*power_step);
         if (increment > pilot) //pilot can't be negative due to variable definition
           increment = pilot;
         pilot -= increment;
         if (pilot < MIN_CURRENT_CAPACITY_J1772)
           pilot = MIN_CURRENT_CAPACITY_J1772;
         g_EvseController.SetCurrentCapacity(pilot,1);  //no save to eeprom
-        transition = 4;
+        transition = 3;  //was 4
       }
       else if (adapter_enabled && (extra_power < turn_off_threshold) && (pilot == MIN_CURRENT_CAPACITY_J1772) && down_scan){  //turn off
          g_EvseController.Sleep();
-         transition = 2;
+         transition = 2;  
       }
     }
   }
@@ -3663,13 +3881,9 @@ void automaticTrackingUpdate() {
 
 void publishData() {
    String tmp, tmp1, tmp2;
-   if ((millis() - Timer) >= SERVER_UPDATE_RATE || immediate_status_update) {
-    Timer = millis();   
-    updateSAStatus();
-    g_EvseController.Update();
-    updateFlag();
-    immediate_status_update = false;
-    adapter_state = getAdapterState(); 
+   if ((millis() - Timer) >= SERVER_UPDATE_RATE || publish_immediately) {
+    Timer = millis();
+    publish_immediately = false;
       
     // We now publish the data
     //Serial.println("Begin publishing data....");
@@ -3681,7 +3895,7 @@ void publishData() {
     tmp1 += " at ";
     sprintf(tmpStr,"%d.%d.%d.%d with strength %ld dBm",myAddress[0],myAddress[1],myAddress[2],myAddress[3],rssi);
     tmp1 += tmpStr;
-    StaticJsonDocument<1024> doc;
+    JsonDocument doc;
     doc["connect"] = tmp1;
     doc["auto"] = g_EvseController.IsAutomaticMode();
     doc["pilot"] = pilot; 
@@ -3689,7 +3903,6 @@ void publishData() {
     doc["dprior"] = device_priority;
     doc["enabled"] = adapter_enabled;
     doc["level"] = g_EvseController.GetCurSvcLevel();
-    doc["state"] = adapter_state;  
     getStateText(adapter_state, adapter_state_text); 
     doc["sttxt"] = adapter_state_text;
     uint8_t evse_ready;
@@ -3700,10 +3913,19 @@ void publishData() {
     doc["ready"] = evse_ready;
     doc["hiamp"] =  hi_amp_setpoint;
     doc["schedat"] = schedule_AT;
+    doc["timer"] = timer_enabled;
+    if (evse_tempS != "")
+      doc["tempc"] = evse_tempC;
+    if (header_received == "$TM"){   //for version 1
+      doc["e_cur"] = evse_currentX10;
+      doc["e"] = lifetime_energy;
+    }
+    doc.shrinkToFit();
     serializeJson (doc,out1);
     tmp2 = base2 + "st";
     if (!server2_down){
-      client.publish(tmp2.c_str(),out1.c_str());
+      if (!client.publish(tmp2.c_str(),out1.c_str()))
+        server2_down = true;
     }
    }
    if ((assigned_index + 1) > number_of_devices)
@@ -3721,7 +3943,7 @@ void publishData() {
    else 
       low = false;
    if (low == false && pre_low == true){  //look for transition
-      StaticJsonDocument<512> doc1;
+      JsonDocument doc1;
       IPAddress myAddress = WiFi.localIP();
       char tmpStr[20];
       sprintf(tmpStr,"%d.%d.%d.%d",myAddress[0],myAddress[1],myAddress[2],myAddress[3]);
@@ -3740,11 +3962,15 @@ void publishData() {
       doc1["mdns"] = mDNS;
       doc1["mac"] = WiFi.macAddress();
       doc1["ipower"] = ipower;
+      doc1["tempon"] = on_off_wait_time;
+      doc1.shrinkToFit();
       serializeJson (doc1,out2);
       tmp2 = base + "devs";  
       if (!server2_down){
-        !client.publish(tmp2.c_str(),out2.c_str());
+        if (!client.publish(tmp2.c_str(),out2.c_str()))
+          server2_down = true;
       }
+      
       uint8_t maxamp;
       if (hi_amp_setpoint > set_current)
         maxamp = set_current;
@@ -3756,7 +3982,8 @@ void publishData() {
       else 
         slow_load = "1";
       if (!server2_down)
-         !client.publish(tmp2.c_str(),slow_load.c_str());
+         if (!client.publish(tmp2.c_str(),slow_load.c_str()))
+            server2_down = true;
    }
    pre_low = low;
 }
@@ -3779,7 +4006,7 @@ void checkBrokerConnection() {
       }
       else {
         if ((server2_down_reconnect_attempt > 24) && (connection_mode == WIFI_MQTT))
-           ESP.reset();  //needed because once down for whatever reason (bug?) sometimes will not recover unless reset
+           reboot = 1;  //needed because once down for whatever reason (bug?) sometimes will not recover unless reset
         server2_down_reconnect_attempt++;
       }
     }
@@ -3805,18 +4032,9 @@ void checkDuplicateDeviceNumbers(String& r_mdns, String& r_mac) {
       if (device >= MAX_NUM_DEVICES)
         device = 0;
       writeEEPROMbyte(DEVICE_START, device);
-      client.disconnect();
-      delay(1000);
-      ESP.reset();
+      reboot = 1;
     }
   }
-}
-
-void saveWord(int16_t value, int16_t location) {
-  int8_t byte = value >> 8;
-    writeEEPROMbyte(location, byte);
-    byte = value & 0x00ff;
-    writeEEPROMbyte(location + 1, byte);
 }
 
 uint8_t IsTimerValid() {
@@ -3833,98 +4051,177 @@ uint8_t IsTimerValid() {
   
 void checkTimer() {
   float tmp;
-  unsigned long curms = millis();
   tmp = kilowatt_seconds_accum/7200.0;
-  if ((curms - m_LastCheck) > 1000ul){
-    time(&now);                       // read the current time
-    localtime_r(&now, &tm);
-    if (schedule_AT && !no_consumed_data_received && !no_mqtt){
-      if (stop_AT > start_AT){
-        if (tm.tm_hour >= start_AT && tm.tm_hour < stop_AT){
-          if (!g_EvseController.IsAutomaticMode())
-            g_EvseController.SetAutomaticMode(1,1);
-        }
-        else {
-          if (g_EvseController.IsAutomaticMode())
-            g_EvseController.SetAutomaticMode(0,1);
-        }
-      }
-      if (stop_AT < start_AT){
-        if (tm.tm_hour >= start_AT || tm.tm_hour < stop_AT){
-          if (!g_EvseController.IsAutomaticMode())
-            g_EvseController.SetAutomaticMode(1,1);
-        }
-        else{
-          if (g_EvseController.IsAutomaticMode())
-            g_EvseController.SetAutomaticMode(0,1);
-        }
-      }
-    } 
-    if (!g_EvseController.IsAutomaticMode() && EVSE_READY) {
-      if ((double_time_limit > 0) && (minutes_charging >= double_time_limit*30) && !g_EvseController.LimitSleepIsSet() && (adapter_state == ADAPTER_STATE_C)){  //time limit reached
-        g_EvseController.SetLimitSleep(1);     
-        g_EvseController.Sleep();
-        if (timer_started){
-          limits_reached = true;
-        }
-      }
-      else if ((half_charge_limit > 0) && (tmp >= half_charge_limit) && !g_EvseController.LimitSleepIsSet() && (adapter_state == ADAPTER_STATE_C)){  //charge limit reached
-        g_EvseController.SetLimitSleep(1);     
-        g_EvseController.Sleep();
-        if (timer_started){
-          limits_reached = true;
-        }
-      }
-      if (timer_enabled && IsTimerValid()) {
-        //Serial.println("inside time delay"); 
-        uint16_t startTimerMinutes = start_hour * 60 + start_min; 
-        uint16_t stopTimerMinutes = stop_hour * 60 + stop_min;
-        uint16_t currTimeMinutes = tm.tm_hour * 60 + tm.tm_min;
-        
-        if (stopTimerMinutes < startTimerMinutes) {
-          //End time is for next day 
-          if ((currTimeMinutes >= startTimerMinutes) || (currTimeMinutes < stopTimerMinutes)){
-            // Within time interval
-            timer_started = true;
-            if (!adapter_enabled && !g_EvseController.LimitSleepIsSet() && !limits_reached) {
-              g_EvseController.Enable();
-            }           
+  if ((millis() - m_LastCheck) >= 500){
+    m_LastCheck = millis();
+    one_second++;
+    reset_sleep = true;
+    if (one_second%2 == 0) {
+      one_second = 0;
+      updatePluggedInStatus();
+      if (solar_evse && (evse_type == JUICEBOX)) {   //checking serial port for messages from evse microcontroller vs via checkevsestatus because needs to be faster to prevent buffer overrun
+        uint8_t start_substring, end_substring;
+        String s, l, h, a, f, t, tf, v, i, p, e;
+        String received, sub;
+        if (Serial.available() > 0){
+         received = Serial.readStringUntil('\n');
+         if (received.substring(0,3) == "$TM"){   //for version 1
+          header_received = received.substring(0,3);
+          start_substring = received.indexOf(':') + 1;
+          end_substring = received.indexOf(':', start_substring);
+          received_from_evse = received.substring(start_substring, end_substring);
+          sub = received_from_evse.substring(received_from_evse.indexOf('s') + 1);
+          s = sub.substring(0,sub.indexOf(','));
+          evse_state = s.toInt();
+          sub = received_from_evse.substring(received_from_evse.indexOf('t') + 1);
+          t = sub.substring(0,sub.indexOf(','));
+          sub = received_from_evse.substring(received_from_evse.indexOf('e') + 1);
+          e = sub.substring(0,sub.indexOf(','));
+          lifetime_energy = e.toInt();
+          evse_tempC = t.toInt();
+          tf = String((9.0*evse_tempC/5.0 + 32.0),1);
+          evse_tempS = "<P>EVSE temp is " + String(evse_tempC) + " deg C or " + tf + " deg F</P>";
+          sub = received_from_evse.substring(received_from_evse.indexOf('v') + 1);
+          v = sub.substring(0,sub.indexOf(','));
+          evse_voltageX10 = v.toInt();
+          sub = received_from_evse.substring(received_from_evse.indexOf('i') + 1);
+          i = sub.substring(0,sub.indexOf(','));
+          evse_currentX10 = i.toInt();
+          sub = received_from_evse.substring(received_from_evse.indexOf('p') + 1);
+          if (sub.substring(0,1) == "-") { 
+            p = sub.substring(1,sub.indexOf(','));
+            evse_pfX1000 = p.toInt();
+            if (evse_pfX1000 < 300)         // in case readings are incorrect intermittently during charging as it has been reported on certain versions
+              evse_pfX1000 = 990;           // even though pf is used in the calculation for power, it's not that important for ev charging so assuming near 1 pf is good
           }
-          else if ((currTimeMinutes >= stopTimerMinutes) && (currTimeMinutes < startTimerMinutes)) { 
-            // Not in time interval
-            timer_started = false;
-            limits_reached = false;
-            g_EvseController.SetLimitSleep(0);
-            if (adapter_enabled){     
-              g_EvseController.Sleep();
+          sub = received_from_evse.substring(received_from_evse.indexOf('R') + 1);
+          h = sub.substring(0,sub.indexOf(','));
+          sub = received_from_evse.substring(received_from_evse.indexOf('A') + 1);
+          a = sub.substring(0,sub.indexOf(','));
+          if (h.toInt() >= a.toInt())
+            evse_max = h.toInt();
+          else
+            evse_max = a.toInt();
+         }
+         if (received.substring(0,3) == "$ES"){   //for version 2
+          start_substring = received.indexOf(':') + 1;
+          end_substring = received.indexOf(':', start_substring);
+          received_from_evse = received.substring(start_substring, end_substring);
+          sub = received_from_evse.substring(received_from_evse.indexOf('S') + 1);
+          s = sub.substring(0,sub.indexOf(','));
+          evse_state = s.toInt();
+          sub = received_from_evse.substring(received_from_evse.indexOf('T') + 1);
+          t = sub.substring(0,sub.indexOf(','));
+          evse_tempC = t.toInt();
+          tf = String((9.0*evse_tempC/5.0 + 32.0),1);
+          evse_tempS = "<P>EVSE temp is " + String(evse_tempC) + " deg C or " + tf + " deg F</P>";
+          sub = received_from_evse.substring(received_from_evse.indexOf('H') + 1);
+          h = sub.substring(0,sub.indexOf(','));
+          sub = received_from_evse.substring(received_from_evse.indexOf('A') + 1);
+          a = sub.substring(0,sub.indexOf(','));
+          sub = received_from_evse.substring(received_from_evse.indexOf('F') + 1);
+          f = sub.substring(0,sub.indexOf(','));
+          if (h.toInt() >= a.toInt())
+            evse_max = h.toInt();
+          else
+            evse_max = a.toInt();
+          if (evse_max < f.toInt())
+            evse_max = f.toInt();
+         }
+         if (received.substring(0,3) == "$WR"){
+          received_error = received.substring(received.indexOf(':') + 1, received.length() - 5);
+         }
+        }
+      }
+      time(&now);                       // read the current time
+      localtime_r(&now, &tm);
+      if (schedule_AT && !no_consumed_data_received && !no_mqtt){
+        if (stop_AT > start_AT){
+          if (tm.tm_hour >= start_AT && tm.tm_hour < stop_AT){
+            if (!g_EvseController.IsAutomaticMode())
+              g_EvseController.SetAutomaticMode(1,1);
+          }
+          else {
+            if (g_EvseController.IsAutomaticMode())
+              g_EvseController.SetAutomaticMode(0,1);
+          }
+        }
+        if (stop_AT < start_AT){
+          if (tm.tm_hour >= start_AT || tm.tm_hour < stop_AT){
+            if (!g_EvseController.IsAutomaticMode())
+              g_EvseController.SetAutomaticMode(1,1);
+          }
+          else{
+            if (g_EvseController.IsAutomaticMode())
+              g_EvseController.SetAutomaticMode(0,1);
+          }
+        }
+      } 
+      if (!g_EvseController.IsAutomaticMode() && EVSE_READY) {
+        if ((double_time_limit > 0) && (minutes_charging >= double_time_limit*30) && !g_EvseController.LimitSleepIsSet() && (adapter_state == ADAPTER_STATE_C)){  //time limit reached
+          g_EvseController.SetLimitSleep(1);     
+          g_EvseController.Sleep();
+          if (timer_started){
+            limits_reached = true;
+          }
+        }
+        else if ((half_charge_limit > 0) && (tmp >= half_charge_limit) && !g_EvseController.LimitSleepIsSet() && (adapter_state == ADAPTER_STATE_C)){  //charge limit reached
+          g_EvseController.SetLimitSleep(1);     
+          g_EvseController.Sleep();
+          if (timer_started){
+            limits_reached = true;
+          }
+        }
+        if (timer_enabled && IsTimerValid()) {
+          //Serial.println("inside time delay"); 
+          uint16_t startTimerMinutes = start_hour * 60 + start_min; 
+          uint16_t stopTimerMinutes = stop_hour * 60 + stop_min;
+          uint16_t currTimeMinutes = tm.tm_hour * 60 + tm.tm_min;
+          
+          if (stopTimerMinutes < startTimerMinutes) {
+            //End time is for next day 
+            if ((currTimeMinutes >= startTimerMinutes) || (currTimeMinutes < stopTimerMinutes)){
+              // Within time interval
+              timer_started = true;
+              if (!adapter_enabled && !g_EvseController.LimitSleepIsSet() && !limits_reached) {
+                g_EvseController.Enable();
+              }           
+            }
+            else if ((currTimeMinutes >= stopTimerMinutes) && (currTimeMinutes < startTimerMinutes)) { 
+              // Not in time interval
+              timer_started = false;
+              limits_reached = false;
+              g_EvseController.SetLimitSleep(0);
+              if (adapter_enabled){     
+                g_EvseController.Sleep();
+              }
             }
           }
-        }
-        else { // not crossing midnite
-          if ((currTimeMinutes >= startTimerMinutes) && (currTimeMinutes < stopTimerMinutes)){
-            // Within time interval
-            timer_started = true;
-            if (!adapter_enabled && !g_EvseController.LimitSleepIsSet() && !limits_reached)
-              g_EvseController.Enable();           
-          }
-          else if ((currTimeMinutes >= stopTimerMinutes) || (currTimeMinutes < startTimerMinutes)){ 
-            // Not in time interval
-            timer_started = false;
-            limits_reached = false;
-            g_EvseController.SetLimitSleep(0);
-            if (adapter_enabled)
-              g_EvseController.Sleep();
+          else { // not crossing midnite
+            if ((currTimeMinutes >= startTimerMinutes) && (currTimeMinutes < stopTimerMinutes)){
+              // Within time interval
+              timer_started = true;
+              if (!adapter_enabled && !g_EvseController.LimitSleepIsSet() && !limits_reached)
+                g_EvseController.Enable();           
+            }
+            else if ((currTimeMinutes >= stopTimerMinutes) || (currTimeMinutes < startTimerMinutes)){ 
+              // Not in time interval
+              timer_started = false;
+              limits_reached = false;
+              g_EvseController.SetLimitSleep(0);
+              if (adapter_enabled)
+                g_EvseController.Sleep();
+            }
           }
         }
       }
     }
-  m_LastCheck = curms;
   }
 }
 
 void processReceivedPMData(char* payload) {
   char* tmpj;
-  StaticJsonDocument <256> doc;
+  JsonDocument doc;
   tmpj = payload;
   deserializeJson(doc,tmpj);
   for (uint8_t i = 0; i < current_num_pm; i++){      //same device reporting again within the timeout
@@ -3986,43 +4283,68 @@ void checkPM() {
 }
 
 void loop() {
-  server.handleClient();
+  server.handleClient(); 
+  //if (solar_evse == 1)
+    Timer12 = millis();   // reset LED timeout as it won't be powered by a battery so no need to turn off LEDs
+  if ((millis() - m_LastCheck >= 125) && (solar_evse == 0) && reset_sleep && 0) {   // Go into light sleep for solaradapter since it could be battery powered
+    WiFi.setSleepMode(WIFI_LIGHT_SLEEP,2);                     // Automatic Light Sleep mode, DTIM listen interval = 2, higher DTIM interval is not recommended as establishing and maintaining a connection is difficult
+    delay(350);
+    m_LastCheck -= 350;  // increment counters that were paused during light sleep
+    Timer12 -= 350;
+    Timer6 -= 350;
+    Timer3 -= 350;
+    Timer4 -= 350;
+    Timer_zero -= 350;
+    Timer -= 350;
+    Timer20 -= 350;
+    reset_sleep = false;
+  }
   ArduinoOTA.handle();        // initiates OTA update capability
   updateRedLED();
   updateYellowLED();
-  firmwareUpdateCheck();
+  firmwareUpdateCheck(0);
   updateSAStatus();
   updateFlag();
   checkTimer();
 
   if (WiFi.isConnected()){
     if (!no_mqtt){
-// Section A. The following section is for safety in case the energy data is no longer updated for 60 secs basically turn_off autotracking and no longer using power
+// Section A. The following section is for safety in case the energy data is no longer updated for 300 secs basically turn_off autotracking and autotracking scheduling and no longer using power
       if (consumed_data_status == 1){
          no_consumed_data_received = false;
          consumed_data_status = 0;
-         if (previously_auto_mode){
+         if (previously_auto_mode & 0x01){        // turn auto tracking on  bit 0 is for autotracking flag, bit 1 is for schedule autotrakcing flag
             g_EvseController.SetAutomaticMode(1,1);
-            previously_auto_mode = false;
+            previously_auto_mode = previously_auto_mode & 0x02;
+         }
+         if (previously_auto_mode & 0x02) {       //schedule auto tracking
+            schedule_AT = 1;
+            previously_auto_mode = previously_auto_mode & 0x01;
          }
          Timer11 = millis();
       }
-      if (consumed_data_status == 0 && ((millis() - Timer11) >= 60000)){  // if topic for power goes away or never started
+      if (consumed_data_status == 0 && ((millis() - Timer11) >= 300000)){  // if topic for power goes away or never started
          Timer11 = millis();
          no_consumed_data_received = true;
          client.disconnect();
-         if (g_EvseController.IsAutomaticMode()){
-            previously_auto_mode = true;        
+         if (g_EvseController.IsAutomaticMode()){   //turn off auto tracking and set flag
+            previously_auto_mode = previously_auto_mode | 0x01;        
             g_EvseController.SetAutomaticMode(0,1);
             g_EvseController.Sleep();
          }
-         delay(1000);
+         if (schedule_AT == 1) {             // turn off scheduled auto tracking and set flag
+            schedule_AT = 0;
+            previously_auto_mode = previously_auto_mode | 0x02;
+         }
       }
  // Section A ends
-      automaticTrackingUpdate();    
+          
       if (!server2_down){
         checkPM();
         processMQTTData();
+      }
+      automaticTrackingUpdate();
+      if (!server2_down){
         publishData();
         publishDone();
         publishResetPriority();
@@ -4031,6 +4353,5 @@ void loop() {
   }
   if (!no_mqtt && ((connection_mode == WIFI) || (connection_mode == WIFI_MQTT))) 
     checkBrokerConnection();
-  if (enable_update)
-    g_EvseController.Update();
+  g_EvseController.Update();
 }

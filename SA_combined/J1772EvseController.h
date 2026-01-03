@@ -172,7 +172,6 @@ public:
   void SetAdapterBypass(uint8_t tf);
  
   void ReadPilot(uint16_t *plow,uint16_t *phigh,int loopcnt=PILOT_LOOP_CNT);
-  void Reboot();
   void SaveEvseFlags();
   
   void SetStateTransitionReqFunc(EvseStateTransitionReqFunc statetransitionreqfunc) {
